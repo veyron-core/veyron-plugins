@@ -1,0 +1,15 @@
+[
+  {
+    "id": "001",
+    "slug": "ping-pong",
+    "name": "Ping Pong",
+    "description": "Minimal example plugin that responds to ping actions.",
+    "version": "0.1.0",
+    "permissions": [],
+    "archive_url": "https://raw.githubusercontent.com/veyron-core/veyron-plugins/main/dist/ping-pong-0.1.0.zip",
+    "source_url": "https://github.com/veyron-core/veyron-plugins/tree/main/plugins/ping-pong-rs",
+    "sha256": "bd74128951b58ca4b40160ac6a71d355fc39fa875ddb4808ca61fd47bfde08d7",
+    "min_kernel_version": "0.1.0",
+    "max_kernel_version": "*"
+  }
+]
