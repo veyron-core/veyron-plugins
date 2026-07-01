@@ -1,0 +1,9 @@
+[package]
+name = "ping-pong-rs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+veyron-sdk = { git = "https://github.com/veyron-core/veyron", package = "veyron-sdk" }
+veyron = { git = "https://github.com/veyron-core/veyron", package = "veyron" }
+tokio = { version = "1", features = ["full"] }
