@@ -1,6 +1,6 @@
 {
   "plugin_id": "network",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "permissions": ["network"],
   "kernel_compatibility_range": {
     "min": "0.1.0",

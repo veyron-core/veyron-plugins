@@ -17,13 +17,13 @@
     "slug": "network",
     "name": "Network",
     "description": "Outbound HTTP for plugins/kernel via one http_request action, gated by PERMISSION_NETWORK. HTTP-only v1.",
-    "version": "0.1.1",
+    "version": "0.1.2",
     "permissions": [
       "network"
     ],
-    "archive_url": "https://raw.githubusercontent.com/veyron-core/veyron-plugins/main/dist/network-0.1.1.zip",
+    "archive_url": "https://raw.githubusercontent.com/veyron-core/veyron-plugins/main/dist/network-0.1.2.zip",
     "source_url": "https://github.com/veyron-core/veyron-plugins/tree/main/plugins/network",
-    "sha256": "56aa21a37f7d9598f6e2787466a3f0e6ccc2e7f8043add0e06788aae162e74f6",
+    "sha256": "ee4469073ce285ca512c2663d44990d9186f6770eaf89aff82b0d94eba4d0174",
     "min_kernel_version": "0.1.0",
     "max_kernel_version": "*"
   }
