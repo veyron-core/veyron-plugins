@@ -1,0 +1,19 @@
+# Example kernel config.yaml entry for the `network` plugin.
+# Copy this block into the top-level `plugins:` list of the kernel's
+# config.yaml (see repo root config.yaml for the full schema).
+
+plugins:
+  - id: network
+    binary: /opt/plugins/network        # path to the built `network` binary
+    restart: on-failure
+    max_restarts: 5
+    sandbox: false                      # required: network egress needs a route out
+    env:
+      # Operator-supplied extra SSRF blocklist, on top of the built-in
+      # ranges (loopback, RFC1918, link-local, multicast, broadcast, cloud
+      # metadata). Comma-separated; each entry is a literal IP or a bare
+      # hostname (matched case-insensitively before DNS resolution).
+      - NETWORK_PLUGIN_EXTRA_BLOCKED_HOSTS=10.99.0.5,internal-admin.corp,203.0.113.7
+    grace_seconds: 10
+    max_procs: 64
+    max_vmem_mb: 512

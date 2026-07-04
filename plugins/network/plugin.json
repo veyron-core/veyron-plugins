@@ -1,0 +1,12 @@
+{
+  "plugin_id": "network",
+  "version": "1.0.0",
+  "permissions": ["PERMISSION_NETWORK"],
+  "kernel_compatibility_range": {
+    "min": "0.1.0",
+    "max": "*"
+  },
+  "binary": "network",
+  "events": [],
+  "actions": ["http_request"]
+}
