@@ -11,5 +11,20 @@
     "sha256": "bd74128951b58ca4b40160ac6a71d355fc39fa875ddb4808ca61fd47bfde08d7",
     "min_kernel_version": "0.1.0",
     "max_kernel_version": "*"
+  },
+  {
+    "id": "002",
+    "slug": "network",
+    "name": "Network",
+    "description": "Outbound HTTP for plugins/kernel via one http_request action, gated by PERMISSION_NETWORK. HTTP-only v1.",
+    "version": "1.0.0",
+    "permissions": [
+      "network"
+    ],
+    "archive_url": "https://raw.githubusercontent.com/veyron-core/veyron-plugins/main/dist/network-1.0.0.zip",
+    "source_url": "https://github.com/veyron-core/veyron-plugins/tree/main/plugins/network",
+    "sha256": "bde9860f20cc19c6e151f5711215a5f18592c22d2ee16dc80eb9428d3cbbaa67",
+    "min_kernel_version": "0.1.0",
+    "max_kernel_version": "*"
   }
 ]
