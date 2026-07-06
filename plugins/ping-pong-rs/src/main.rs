@@ -11,7 +11,10 @@ impl Plugin for PingPongPlugin {
     }
 
     fn manifest(&self) -> PluginManifest {
-        PluginManifest::default()
+        PluginManifest {
+            actions: vec!["ping".to_string()],
+            ..Default::default()
+        }
     }
 
     async fn on_init(&mut self, _client: &mut VeyronClient) -> Result<(), VeyronError> {
