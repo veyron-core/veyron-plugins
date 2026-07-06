@@ -15,6 +15,13 @@ struct NetworkPlugin {
     client: reqwest::Client,
 }
 
+/// Operator-only opt-in proxy for all outbound requests. Deliberately not a
+/// per-request param: a caller-controlled proxy would let any action bypass
+/// `SsrfSafeResolver` entirely (the target host is resolved by the proxy,
+/// not by us), so only an operator setting the plugin's own environment can
+/// enable it.
+const PROXY_URL_ENV: &str = "NETWORK_PLUGIN_PROXY_URL";
+
 impl NetworkPlugin {
     fn new() -> Self {
         // SSRF gating lives in `SsrfSafeResolver` (used for every connect,
@@ -25,11 +32,20 @@ impl NetworkPlugin {
         let resolver = handler::SsrfSafeResolver {
             extra_blocklist: network_plugin::ssrf::Blocklist::from_env(),
         };
-        let client = reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .dns_resolver(Arc::new(resolver))
-            .build()
-            .expect("failed to build reqwest client");
+            // reqwest honors HTTP_PROXY/HTTPS_PROXY from the environment by
+            // default; that would silently route requests around
+            // SsrfSafeResolver. Turn it off — proxying is opt-in only via
+            // `NETWORK_PLUGIN_PROXY_URL` below.
+            .no_proxy();
+        if let Ok(proxy_url) = std::env::var(PROXY_URL_ENV) {
+            let proxy = reqwest::Proxy::all(&proxy_url)
+                .unwrap_or_else(|e| panic!("invalid {PROXY_URL_ENV}: {e}"));
+            builder = builder.proxy(proxy);
+        }
+        let client = builder.build().expect("failed to build reqwest client");
         Self { client }
     }
 

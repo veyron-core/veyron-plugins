@@ -7,6 +7,20 @@ use std::collections::HashMap;
 /// rejected.
 pub const MAX_TIMEOUT_MS: u64 = 30_000;
 
+/// Hard ceiling on `max_retries`. Retries are opt-in per request — a caller
+/// that doesn't set `max_retries` gets none, so an unmodified caller sees no
+/// behavior change.
+pub const MAX_RETRIES: u32 = 5;
+
+/// Default initial backoff between retry attempts, used when the caller
+/// omits `retry_backoff_ms`.
+pub const DEFAULT_RETRY_BACKOFF_MS: u64 = 200;
+
+/// Hard ceiling on `retry_backoff_ms` (also caps the exponential growth
+/// between attempts), so a caller can't turn a retry into a multi-minute
+/// stall.
+pub const MAX_RETRY_BACKOFF_MS: u64 = 5_000;
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct HttpRequestParams {
     pub method: String,
@@ -14,6 +28,8 @@ pub struct HttpRequestParams {
     pub headers: HashMap<String, String>,
     pub body: Option<String>,
     pub timeout_ms: u64,
+    pub max_retries: u32,
+    pub retry_backoff_ms: u64,
 }
 
 const ALLOWED_METHODS: &[&str] = &[
@@ -32,6 +48,8 @@ pub fn parse_request(params_json: &[u8]) -> Result<HttpRequestParams, String> {
         headers: HashMap<String, String>,
         body: Option<String>,
         timeout_ms: Option<u64>,
+        max_retries: Option<u32>,
+        retry_backoff_ms: Option<u64>,
     }
 
     let raw: Raw =
@@ -50,6 +68,11 @@ pub fn parse_request(params_json: &[u8]) -> Result<HttpRequestParams, String> {
     }
 
     let timeout_ms = raw.timeout_ms.unwrap_or(MAX_TIMEOUT_MS).min(MAX_TIMEOUT_MS);
+    let max_retries = raw.max_retries.unwrap_or(0).min(MAX_RETRIES);
+    let retry_backoff_ms = raw
+        .retry_backoff_ms
+        .unwrap_or(DEFAULT_RETRY_BACKOFF_MS)
+        .min(MAX_RETRY_BACKOFF_MS);
 
     Ok(HttpRequestParams {
         method,
@@ -57,6 +80,8 @@ pub fn parse_request(params_json: &[u8]) -> Result<HttpRequestParams, String> {
         headers: raw.headers,
         body: raw.body,
         timeout_ms,
+        max_retries,
+        retry_backoff_ms,
     })
 }
 
@@ -110,5 +135,31 @@ mod tests {
         )
         .unwrap();
         assert_eq!(params.timeout_ms, 500);
+    }
+
+    #[test]
+    fn defaults_to_no_retries() {
+        let params =
+            parse_request(br#"{"method": "GET", "url": "https://example.com"}"#).unwrap();
+        assert_eq!(params.max_retries, 0);
+        assert_eq!(params.retry_backoff_ms, DEFAULT_RETRY_BACKOFF_MS);
+    }
+
+    #[test]
+    fn clamps_max_retries_above_cap() {
+        let params = parse_request(
+            br#"{"method": "GET", "url": "https://example.com", "max_retries": 99}"#,
+        )
+        .unwrap();
+        assert_eq!(params.max_retries, MAX_RETRIES);
+    }
+
+    #[test]
+    fn clamps_retry_backoff_above_cap() {
+        let params = parse_request(
+            br#"{"method": "GET", "url": "https://example.com", "retry_backoff_ms": 999999}"#,
+        )
+        .unwrap();
+        assert_eq!(params.retry_backoff_ms, MAX_RETRY_BACKOFF_MS);
     }
 }

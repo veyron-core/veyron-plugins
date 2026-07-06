@@ -68,9 +68,59 @@ impl Resolve for SsrfSafeResolver {
     }
 }
 
-/// Send the HTTP request and map the response. SSRF gating happens inside
-/// the `client`'s DNS resolver, not here — see module docs.
+/// Response statuses worth retrying: rate-limited or transient server-side
+/// failure. Anything else (including other 4xx) is the caller's problem, not
+/// a transient one, so it's returned as-is on the first attempt.
+fn is_retryable_status(status: u16) -> bool {
+    matches!(status, 429 | 500 | 502 | 503 | 504)
+}
+
+/// Send the HTTP request and map the response, retrying transient failures
+/// up to `params.max_retries` times with exponential backoff
+/// (`params.retry_backoff_ms`, doubling, capped at
+/// [`crate::request::MAX_RETRY_BACKOFF_MS`]). SSRF gating happens inside the
+/// `client`'s DNS resolver, not here — see module docs.
 pub async fn fetch(
+    client: &reqwest::Client,
+    params: &HttpRequestParams,
+) -> Result<HttpResponseJson, String> {
+    let host = reqwest::Url::parse(&params.url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_default();
+    let started = std::time::Instant::now();
+    let mut backoff_ms = params.retry_backoff_ms;
+    let mut attempt = 0;
+
+    loop {
+        let result = fetch_once(client, params).await;
+        let retry = attempt < params.max_retries
+            && match &result {
+                Ok(resp) => is_retryable_status(resp.status),
+                Err(_) => true,
+            };
+
+        let status = result.as_ref().map(|r| r.status).ok();
+        println!(
+            "[network] method={} host={} attempt={} status={:?} error={:?} duration_ms={}",
+            params.method,
+            host,
+            attempt + 1,
+            status,
+            result.as_ref().err(),
+            started.elapsed().as_millis(),
+        );
+
+        if !retry {
+            return result;
+        }
+        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+        backoff_ms = (backoff_ms * 2).min(crate::request::MAX_RETRY_BACKOFF_MS);
+        attempt += 1;
+    }
+}
+
+async fn fetch_once(
     client: &reqwest::Client,
     params: &HttpRequestParams,
 ) -> Result<HttpResponseJson, String> {
@@ -124,6 +174,8 @@ mod tests {
             headers: HashMap::new(),
             body: None,
             timeout_ms: 5000,
+            max_retries: 0,
+            retry_backoff_ms: 1,
         }
     }
 
@@ -164,6 +216,39 @@ mod tests {
         let client = reqwest::Client::new();
         let err = fetch(&client, &params(url)).await.unwrap_err();
         assert!(err.contains("10 MiB"), "error was: {err}");
+    }
+
+    #[tokio::test]
+    async fn fetch_retries_on_retryable_status_then_succeeds() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            for response in [
+                "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\n\r\n",
+                "HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok",
+            ] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buf = [0u8; 1024];
+                let _ = socket.read(&mut buf).await;
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        let client = reqwest::Client::new();
+        let mut p = params(format!("http://{addr}/"));
+        p.max_retries = 1;
+        let resp = fetch(&client, &p).await.unwrap();
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body, "ok");
+    }
+
+    #[tokio::test]
+    async fn fetch_does_not_retry_non_retryable_status() {
+        let url = mock_server("HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n").await;
+        let client = reqwest::Client::new();
+        let mut p = params(url);
+        p.max_retries = 3;
+        let resp = fetch(&client, &p).await.unwrap();
+        assert_eq!(resp.status, 404);
     }
 
     #[tokio::test]

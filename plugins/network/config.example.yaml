@@ -14,6 +14,11 @@ plugins:
       # metadata). Comma-separated; each entry is a literal IP or a bare
       # hostname (matched case-insensitively before DNS resolution).
       - NETWORK_PLUGIN_EXTRA_BLOCKED_HOSTS=10.99.0.5,internal-admin.corp,203.0.113.7
+      # Optional: route all outbound requests through this proxy. Not set by
+      # default — ambient HTTP_PROXY/HTTPS_PROXY env vars are ignored so the
+      # SSRF blocklist can't be bypassed by accident. Only point this at a
+      # proxy you trust, since it resolves the target host itself.
+      # - NETWORK_PLUGIN_PROXY_URL=http://proxy.internal:8080
     grace_seconds: 10
     max_procs: 64
     max_vmem_mb: 512
