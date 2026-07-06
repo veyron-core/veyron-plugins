@@ -4,39 +4,42 @@ Goal: make `network` the one blessed way any plugin does outbound network
 I/O — nobody else opens sockets, everybody routes through here so SSRF
 policy, egress control, and observability live in one place.
 
+## Done
+
+- **Response body as bytes, not lossy UTF-8** — `body` is UTF-8 text as-is
+  when valid, else base64 with `body_encoding: "base64"`.
+- **Header/URL size caps** — `MAX_URL_LEN` (8 KiB), `MAX_HEADER_COUNT`
+  (100), `MAX_HEADERS_TOTAL_BYTES` (32 KiB), all rejected outright.
+- **IPv6 SSRF test coverage** — loopback/unique-local/link-local/multicast
+  and a public-IP allow case, mirroring the v4 tests.
+- **Allowlist mode** — `NETWORK_PLUGIN_ALLOWED_HOSTS`, default-deny except
+  listed hosts/IPs; `NETWORK_PLUGIN_EXTRA_BLOCKED_HOSTS` still overrides on
+  top.
+- **Redirect-follow, opt-in** — `follow_redirects: true` follows up to
+  `MAX_REDIRECTS` (10, fixed) hops; every hop still resolves through
+  `SsrfSafeResolver` via a second pre-built client
+  (`NetworkPlugin::redirect_client`), sharing the same TLS/proxy config as
+  the default client.
+- **TLS client cert (mTLS) + custom CA bundle** —
+  `NETWORK_PLUGIN_CA_BUNDLE_PATH` / `NETWORK_PLUGIN_CLIENT_IDENTITY_PATH`.
+- **Structured JSON logging** — one JSON line per attempt to stdout.
+- **Retry with backoff** — `max_retries`/`retry_backoff_ms`, retries only
+  on 429/5xx/transport errors.
+- **Opt-in proxy** — `NETWORK_PLUGIN_PROXY_URL`; ambient `HTTP_PROXY` env
+  is now ignored (was a silent SSRF bypass before this was closed).
+
 ## Near-term (buildable now, no kernel changes)
 
-- **Response body as bytes, not lossy UTF-8** — `resp.body` is currently
-  `String::from_utf8_lossy`, which corrupts binary responses (images,
-  protobuf, gzip). Switch to base64-encoded bytes, or branch on
-  `content-type` and only lossy-decode text.
-- **Header/URL size caps** — no limit today on header count/size or URL
-  length; a caller (or compromised plugin) can hand us gigantic headers.
-  Cap similar to `MAX_BODY_BYTES`.
-- **IPv6 SSRF test coverage** — `is_blocked_ip`'s V6 branch
-  (`unique_local`/`unicast_link_local`/multicast) has no unit tests,
-  unlike the V4 branch. Close the gap.
-- **Allowlist mode** — operator-configurable switch from default-block-list
-  to default-deny-except-allowlist, for locked-down deployments
-  (`NETWORK_PLUGIN_ALLOWED_HOSTS`, mirroring the existing
-  `NETWORK_PLUGIN_EXTRA_BLOCKED_HOSTS` shape).
 - **Per-caller concurrency cap** — track in-flight requests per calling
-  plugin id (if `ActionRequest` carries a caller id) and reject over some
-  configurable limit, so one noisy plugin can't monopolize `network`'s
-  outbound connections even without kernel-level quotas.
-- **Redirect-follow, opt-in** — v1 disables redirects outright. Add an
-  opt-in `follow_redirects: bool` + `max_redirects` param, re-checking the
-  SSRF resolver on every hop (it already covers this — just re-enable
-  `redirect::Policy` with a policy closure instead of `none()`).
-- **TLS client cert (mTLS) + custom CA bundle** — operator-supplied
-  `NETWORK_PLUGIN_CLIENT_CERT_PATH`/`NETWORK_PLUGIN_CLIENT_KEY_PATH` and
-  `NETWORK_PLUGIN_CA_BUNDLE_PATH`, for talking to internal APIs that need
-  mutual TLS or a private CA. Operator-only (env), same trust model as
-  `NETWORK_PLUGIN_PROXY_URL`.
-- **Structured JSON logging** — current stdout logging is
-  `println!`-formatted text; switch to one-line JSON per attempt so
-  operators can pipe it into normal log aggregation without a custom
-  parser.
+  plugin id and reject over some configurable limit, so one noisy plugin
+  can't monopolize `network`'s outbound connections. Currently blocked:
+  `ActionRequest` has no caller-id field to key on (see
+  `KERNEL_PROTOCOL_TODO.md`) — would need that added first, or the kernel
+  to pass caller identity some other way.
+- **Configurable `max_redirects` per request** — today it's a fixed 10 via
+  a single pre-built client; a genuinely per-request cap would need either
+  a client built per request (loses connection pooling) or a custom
+  `redirect::Policy` closure driven by request-scoped state.
 
 ## Requires kernel/protocol changes (see `KERNEL_PROTOCOL_TODO.md`, gitignored)
 

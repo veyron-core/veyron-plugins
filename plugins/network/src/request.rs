@@ -21,6 +21,23 @@ pub const DEFAULT_RETRY_BACKOFF_MS: u64 = 200;
 /// stall.
 pub const MAX_RETRY_BACKOFF_MS: u64 = 5_000;
 
+/// Hard ceiling on URL length. Rejected outright, never truncated.
+pub const MAX_URL_LEN: usize = 8 * 1024;
+
+/// Hard ceiling on header count. Rejected outright.
+pub const MAX_HEADER_COUNT: usize = 100;
+
+/// Hard ceiling on total header bytes (sum of every key+value length).
+/// Rejected outright — this bounds worst-case memory for a request with
+/// many small headers as well as a few huge ones.
+pub const MAX_HEADERS_TOTAL_BYTES: usize = 32 * 1024;
+
+/// Redirects are disabled unless `follow_redirects` is set, and even then
+/// capped at this many hops (not caller-configurable — see main.rs, which
+/// builds one fixed redirect-enabled client rather than one per request).
+/// Every hop still resolves through `SsrfSafeResolver`.
+pub const MAX_REDIRECTS: usize = 10;
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct HttpRequestParams {
     pub method: String,
@@ -30,6 +47,7 @@ pub struct HttpRequestParams {
     pub timeout_ms: u64,
     pub max_retries: u32,
     pub retry_backoff_ms: u64,
+    pub follow_redirects: bool,
 }
 
 const ALLOWED_METHODS: &[&str] = &[
@@ -50,6 +68,7 @@ pub fn parse_request(params_json: &[u8]) -> Result<HttpRequestParams, String> {
         timeout_ms: Option<u64>,
         max_retries: Option<u32>,
         retry_backoff_ms: Option<u64>,
+        follow_redirects: Option<bool>,
     }
 
     let raw: Raw =
@@ -62,9 +81,22 @@ pub fn parse_request(params_json: &[u8]) -> Result<HttpRequestParams, String> {
     }
 
     let url_str = raw.url.ok_or("missing required field: url")?;
+    if url_str.len() > MAX_URL_LEN {
+        return Err(format!("url exceeds {MAX_URL_LEN}-byte cap"));
+    }
     let parsed = url::Url::parse(&url_str).map_err(|e| format!("invalid url: {e}"))?;
     if parsed.scheme() != "http" && parsed.scheme() != "https" {
         return Err(format!("blocked scheme: {}", parsed.scheme()));
+    }
+
+    if raw.headers.len() > MAX_HEADER_COUNT {
+        return Err(format!("too many headers: max {MAX_HEADER_COUNT}"));
+    }
+    let headers_total_bytes: usize = raw.headers.iter().map(|(k, v)| k.len() + v.len()).sum();
+    if headers_total_bytes > MAX_HEADERS_TOTAL_BYTES {
+        return Err(format!(
+            "headers exceed {MAX_HEADERS_TOTAL_BYTES}-byte total cap"
+        ));
     }
 
     let timeout_ms = raw.timeout_ms.unwrap_or(MAX_TIMEOUT_MS).min(MAX_TIMEOUT_MS);
@@ -82,6 +114,7 @@ pub fn parse_request(params_json: &[u8]) -> Result<HttpRequestParams, String> {
         timeout_ms,
         max_retries,
         retry_backoff_ms,
+        follow_redirects: raw.follow_redirects.unwrap_or(false),
     })
 }
 
@@ -152,6 +185,44 @@ mod tests {
         )
         .unwrap();
         assert_eq!(params.max_retries, MAX_RETRIES);
+    }
+
+    #[test]
+    fn rejects_url_over_length_cap() {
+        let long_path = "a".repeat(MAX_URL_LEN);
+        let url = format!("https://example.com/{long_path}");
+        let body = serde_json::json!({"method": "GET", "url": url}).to_string();
+        let err = parse_request(body.as_bytes()).unwrap_err();
+        assert!(err.contains("url"), "error was: {err}");
+    }
+
+    #[test]
+    fn rejects_too_many_headers() {
+        let headers: HashMap<String, String> = (0..MAX_HEADER_COUNT + 1)
+            .map(|i| (format!("h{i}"), "v".to_string()))
+            .collect();
+        let body = serde_json::json!({
+            "method": "GET",
+            "url": "https://example.com",
+            "headers": headers,
+        })
+        .to_string();
+        let err = parse_request(body.as_bytes()).unwrap_err();
+        assert!(err.contains("too many headers"), "error was: {err}");
+    }
+
+    #[test]
+    fn rejects_headers_over_total_byte_cap() {
+        let mut headers = HashMap::new();
+        headers.insert("h".to_string(), "v".repeat(MAX_HEADERS_TOTAL_BYTES + 1));
+        let body = serde_json::json!({
+            "method": "GET",
+            "url": "https://example.com",
+            "headers": headers,
+        })
+        .to_string();
+        let err = parse_request(body.as_bytes()).unwrap_err();
+        assert!(err.contains("byte total cap"), "error was: {err}");
     }
 
     #[test]

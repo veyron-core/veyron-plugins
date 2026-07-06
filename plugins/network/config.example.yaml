@@ -19,6 +19,17 @@ plugins:
       # SSRF blocklist can't be bypassed by accident. Only point this at a
       # proxy you trust, since it resolves the target host itself.
       # - NETWORK_PLUGIN_PROXY_URL=http://proxy.internal:8080
+      # Optional: switch from default-block to default-deny — only these
+      # hosts/IPs are reachable at all (built-in private-range blocking is
+      # skipped for listed entries; NETWORK_PLUGIN_EXTRA_BLOCKED_HOSTS still
+      # overrides on top).
+      # - NETWORK_PLUGIN_ALLOWED_HOSTS=10.0.5.10,internal-api.corp
+      # Optional: trust an extra CA (PEM, one or more certs concatenated)
+      # for internal APIs signed by a private CA.
+      # - NETWORK_PLUGIN_CA_BUNDLE_PATH=/etc/network-plugin/ca-bundle.pem
+      # Optional: present a client cert for mTLS. Single PEM file with cert
+      # + private key concatenated.
+      # - NETWORK_PLUGIN_CLIENT_IDENTITY_PATH=/etc/network-plugin/client-identity.pem
     grace_seconds: 10
     max_procs: 64
     max_vmem_mb: 512

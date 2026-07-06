@@ -22,7 +22,7 @@ use std::time::Duration;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 
 use crate::request::HttpRequestParams;
-use crate::ssrf::{self, Blocklist};
+use crate::ssrf::{self, Allowlist, Blocklist};
 
 /// Response bodies larger than this are rejected outright (`ACTION_ERROR`),
 /// never silently truncated.
@@ -32,7 +32,12 @@ pub const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 pub struct HttpResponseJson {
     pub status: u16,
     pub headers: HashMap<String, String>,
+    /// Text body as-is when valid UTF-8, otherwise base64 — see
+    /// `body_encoding`. Never lossily mangled: binary responses (images,
+    /// protobuf, etc.) round-trip exactly via the base64 path.
     pub body: String,
+    /// `"utf8"` or `"base64"`, telling the caller how to interpret `body`.
+    pub body_encoding: &'static str,
 }
 
 /// DNS resolver that filters out any IP blocked by [`ssrf::is_blocked_ip`].
@@ -42,23 +47,36 @@ pub struct HttpResponseJson {
 #[derive(Clone, Default)]
 pub struct SsrfSafeResolver {
     pub extra_blocklist: Blocklist,
+    /// When non-empty, switches from default-block (built-in ranges) to
+    /// default-deny: only hosts/IPs listed here (or in neither, minus
+    /// `extra_blocklist`) may be reached — see [`Allowlist`] docs.
+    pub allowlist: Allowlist,
 }
 
 impl Resolve for SsrfSafeResolver {
     fn resolve(&self, name: Name) -> Resolving {
         let extra_blocklist = self.extra_blocklist.clone();
+        let allowlist = self.allowlist.clone();
         Box::pin(async move {
             let host = name.as_str().to_string();
             if extra_blocklist.blocks_host(&host) {
                 return Err(format!("host {host} is blocked by operator blocklist").into());
             }
-
             let resolved = tokio::net::lookup_host((host.as_str(), 0))
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
 
             let allowed: Vec<_> = resolved
-                .filter(|a| !ssrf::is_blocked_ip(a.ip()) && !extra_blocklist.blocks_ip(&a.ip()))
+                .filter(|a| {
+                    if extra_blocklist.blocks_ip(&a.ip()) {
+                        return false;
+                    }
+                    if !allowlist.is_empty() {
+                        allowlist.allows_host(&host) || allowlist.allows_ip(&a.ip())
+                    } else {
+                        !ssrf::is_blocked_ip(a.ip())
+                    }
+                })
                 .collect();
             if allowed.is_empty() {
                 return Err(format!("all resolved IPs for {host} are blocked by SSRF policy").into());
@@ -100,16 +118,18 @@ pub async fn fetch(
                 Err(_) => true,
             };
 
-        let status = result.as_ref().map(|r| r.status).ok();
-        println!(
-            "[network] method={} host={} attempt={} status={:?} error={:?} duration_ms={}",
-            params.method,
-            host,
-            attempt + 1,
-            status,
-            result.as_ref().err(),
-            started.elapsed().as_millis(),
-        );
+        // One-line JSON per attempt so operators can pipe stdout straight
+        // into normal log aggregation instead of parsing a custom format.
+        let log_line = serde_json::json!({
+            "plugin": "network",
+            "method": params.method,
+            "host": host,
+            "attempt": attempt + 1,
+            "status": result.as_ref().ok().map(|r| r.status),
+            "error": result.as_ref().err(),
+            "duration_ms": started.elapsed().as_millis(),
+        });
+        println!("{log_line}");
 
         if !retry {
             return result;
@@ -154,10 +174,22 @@ async fn fetch_once(
         }
     }
 
+    let (body, body_encoding) = match String::from_utf8(body_bytes) {
+        Ok(text) => (text, "utf8"),
+        Err(e) => {
+            use base64::Engine;
+            (
+                base64::engine::general_purpose::STANDARD.encode(e.into_bytes()),
+                "base64",
+            )
+        }
+    };
+
     Ok(HttpResponseJson {
         status,
         headers,
-        body: String::from_utf8_lossy(&body_bytes).into_owned(),
+        body,
+        body_encoding,
     })
 }
 
@@ -176,6 +208,7 @@ mod tests {
             timeout_ms: 5000,
             max_retries: 0,
             retry_backoff_ms: 1,
+            follow_redirects: false,
         }
     }
 
@@ -205,6 +238,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fetch_base64_encodes_non_utf8_body() {
+        let raw_body: &[u8] = &[0xff, 0xfe, 0xfd, 0x00, 0x01];
+        let mut response = b"HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\n".to_vec();
+        response.extend_from_slice(raw_body);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = socket.read(&mut buf).await;
+            let _ = socket.write_all(&response).await;
+        });
+        let client = reqwest::Client::new();
+        let resp = fetch(&client, &params(format!("http://{addr}/"))).await.unwrap();
+        assert_eq!(resp.body_encoding, "base64");
+        use base64::Engine;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&resp.body)
+            .unwrap();
+        assert_eq!(decoded, raw_body);
+    }
+
+    #[tokio::test]
+    async fn fetch_returns_utf8_encoding_for_text_body() {
+        let url = mock_server("HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\nhello").await;
+        let client = reqwest::Client::new();
+        let resp = fetch(&client, &params(url)).await.unwrap();
+        assert_eq!(resp.body_encoding, "utf8");
+    }
+
+    #[tokio::test]
     async fn fetch_errors_on_body_over_cap() {
         let big_body = "x".repeat(MAX_BODY_BYTES + 1);
         let response = format!(
@@ -216,6 +280,48 @@ mod tests {
         let client = reqwest::Client::new();
         let err = fetch(&client, &params(url)).await.unwrap_err();
         assert!(err.contains("10 MiB"), "error was: {err}");
+    }
+
+    #[tokio::test]
+    async fn fetch_does_not_follow_redirect_by_default() {
+        let url = mock_server(
+            "HTTP/1.1 302 Found\r\nlocation: http://example.invalid/\r\ncontent-length: 0\r\n\r\n",
+        )
+        .await;
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        let resp = fetch(&client, &params(url)).await.unwrap();
+        assert_eq!(resp.status, 302);
+    }
+
+    #[tokio::test]
+    async fn fetch_follows_redirect_when_client_allows_it() {
+        let final_addr = {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buf = [0u8; 1024];
+                let _ = socket.read(&mut buf).await;
+                let _ = socket
+                    .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok")
+                    .await;
+            });
+            addr
+        };
+        let redirect_response = format!(
+            "HTTP/1.1 302 Found\r\nlocation: http://{final_addr}/\r\ncontent-length: 0\r\n\r\n"
+        );
+        let url = mock_server(Box::leak(redirect_response.into_boxed_str())).await;
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::limited(10))
+            .build()
+            .unwrap();
+        let resp = fetch(&client, &params(url)).await.unwrap();
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body, "ok");
     }
 
     #[tokio::test]

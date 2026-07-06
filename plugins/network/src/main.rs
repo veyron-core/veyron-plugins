@@ -13,6 +13,7 @@ use veyron_sdk::{Plugin, VeyronClient, VeyronError};
 
 struct NetworkPlugin {
     client: reqwest::Client,
+    redirect_client: reqwest::Client,
 }
 
 /// Operator-only opt-in proxy for all outbound requests. Deliberately not a
@@ -22,18 +23,39 @@ struct NetworkPlugin {
 /// enable it.
 const PROXY_URL_ENV: &str = "NETWORK_PLUGIN_PROXY_URL";
 
+/// Operator-supplied extra CA cert(s) (PEM, one or more concatenated) to
+/// trust in addition to the built-in root store — for internal APIs signed
+/// by a private CA.
+const CA_BUNDLE_PATH_ENV: &str = "NETWORK_PLUGIN_CA_BUNDLE_PATH";
+
+/// Operator-supplied client identity (a single PEM file containing both the
+/// client certificate and its private key, concatenated) for mTLS.
+const CLIENT_IDENTITY_PATH_ENV: &str = "NETWORK_PLUGIN_CLIENT_IDENTITY_PATH";
+
 impl NetworkPlugin {
     fn new() -> Self {
+        Self {
+            client: Self::build_client(reqwest::redirect::Policy::none()),
+            redirect_client: Self::build_client(reqwest::redirect::Policy::limited(
+                request::MAX_REDIRECTS,
+            )),
+        }
+    }
+
+    /// Builds one `reqwest::Client` with every operator-configured option
+    /// (SSRF resolver, proxy, CA bundle, client identity) applied — only
+    /// `redirect` differs between `client` and `redirect_client`, so both
+    /// share the same TLS/proxy/SSRF posture instead of drifting apart.
+    fn build_client(redirect_policy: reqwest::redirect::Policy) -> reqwest::Client {
         // SSRF gating lives in `SsrfSafeResolver` (used for every connect,
-        // including redirects); `Policy::none()` additionally disables
-        // redirects outright since v1 has no need to follow them and it
-        // keeps the SSRF-safe resolver as the sole point of trust rather
-        // than relying on it alone for redirect hops too.
+        // including redirects) rather than a one-time pre-flight check —
+        // see module docs on `SsrfSafeResolver`.
         let resolver = handler::SsrfSafeResolver {
             extra_blocklist: network_plugin::ssrf::Blocklist::from_env(),
+            allowlist: network_plugin::ssrf::Allowlist::from_env(),
         };
         let mut builder = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
+            .redirect(redirect_policy)
             .dns_resolver(Arc::new(resolver))
             // reqwest honors HTTP_PROXY/HTTPS_PROXY from the environment by
             // default; that would silently route requests around
@@ -45,17 +67,39 @@ impl NetworkPlugin {
                 .unwrap_or_else(|e| panic!("invalid {PROXY_URL_ENV}: {e}"));
             builder = builder.proxy(proxy);
         }
-        let client = builder.build().expect("failed to build reqwest client");
-        Self { client }
+        if let Ok(ca_path) = std::env::var(CA_BUNDLE_PATH_ENV) {
+            let pem = std::fs::read(&ca_path)
+                .unwrap_or_else(|e| panic!("failed to read {CA_BUNDLE_PATH_ENV} ({ca_path}): {e}"));
+            let certs = reqwest::Certificate::from_pem_bundle(&pem)
+                .unwrap_or_else(|e| panic!("invalid CA bundle at {ca_path}: {e}"));
+            for cert in certs {
+                builder = builder.add_root_certificate(cert);
+            }
+        }
+        if let Ok(identity_path) = std::env::var(CLIENT_IDENTITY_PATH_ENV) {
+            let pem = std::fs::read(&identity_path).unwrap_or_else(|e| {
+                panic!("failed to read {CLIENT_IDENTITY_PATH_ENV} ({identity_path}): {e}")
+            });
+            let identity = reqwest::Identity::from_pem(&pem)
+                .unwrap_or_else(|e| panic!("invalid client identity at {identity_path}: {e}"));
+            builder = builder.identity(identity);
+        }
+        builder.build().expect("failed to build reqwest client")
     }
 
     async fn handle_http_request(&self, params_json: &[u8]) -> Result<Vec<u8>, String> {
         let params = request::parse_request(params_json)?;
-        let resp = handler::fetch(&self.client, &params).await?;
+        let client = if params.follow_redirects {
+            &self.redirect_client
+        } else {
+            &self.client
+        };
+        let resp = handler::fetch(client, &params).await?;
         serde_json::to_vec(&serde_json::json!({
             "status": resp.status,
             "headers": resp.headers,
             "body": resp.body,
+            "body_encoding": resp.body_encoding,
         }))
         .map_err(|e| format!("failed to encode response: {e}"))
     }

@@ -62,8 +62,45 @@ a proxy you trust to do its own filtering.
 
 ## Logging
 
-Every attempt (including retries) logs one line to stdout: method, target
-host, attempt number, status or error, and elapsed time. There's no
+Every attempt (including retries) logs one JSON line to stdout: `plugin`,
+`method`, `host`, `attempt`, `status`, `error`, `duration_ms`. There's no
 kernel-event-bus metrics path yet — the wire protocol has no plugin → event
 publish path (only kernel-internal code calls `EventBus::publish`), so that
 would need changes in `veyron-core` itself, not this plugin.
+
+## Response body encoding
+
+`body` is the response text as-is when it's valid UTF-8. When it isn't
+(binary responses — images, protobuf, etc.), `body` is base64 and
+`body_encoding` is `"base64"` instead of `"utf8"`. Always check
+`body_encoding` before treating `body` as text.
+
+## Redirects
+
+Disabled by default (`ACTION_OK` with the redirect's own 3xx status
+returned as-is). Set `follow_redirects: true` to follow up to
+`MAX_REDIRECTS` (10, fixed — not caller-configurable) hops; every hop still
+resolves through `SsrfSafeResolver`, so a redirect to a blocked host still
+fails the whole request.
+
+## Allowlist mode (operator-configurable)
+
+`NETWORK_PLUGIN_ALLOWED_HOSTS` (same comma-separated IP/hostname shape as
+`NETWORK_PLUGIN_EXTRA_BLOCKED_HOSTS`) switches from default-block to
+default-deny: when set, only listed hosts/IPs are reachable at all, and the
+built-in RFC1918/loopback/etc. ranges stop being consulted for them (an
+allowlist is an explicit statement that reaching that address, even a
+private one, is intended). `NETWORK_PLUGIN_EXTRA_BLOCKED_HOSTS` still
+applies on top as an override.
+
+## TLS: custom CA bundle and client identity (mTLS)
+
+- `NETWORK_PLUGIN_CA_BUNDLE_PATH` — path to one or more PEM-encoded CA
+  certificates (concatenated), trusted in addition to the built-in root
+  store. For internal APIs signed by a private CA.
+- `NETWORK_PLUGIN_CLIENT_IDENTITY_PATH` — path to a single PEM file
+  containing both the client certificate and its private key
+  (concatenated), presented for mutual TLS.
+
+Both are read once at startup; an invalid path or malformed PEM aborts
+plugin startup rather than silently skipping TLS config.

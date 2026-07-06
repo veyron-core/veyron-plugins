@@ -70,6 +70,66 @@ impl Blocklist {
     }
 }
 
+/// Env var switching from default-block (the built-in ranges) to
+/// default-deny: when set (non-empty), only hosts/IPs listed here may be
+/// reached at all — the built-in RFC1918/loopback/etc. ranges are no longer
+/// consulted for allowlisted entries, since an allowlist is an explicit
+/// operator statement that reaching that (possibly private) address is
+/// intended. [`EXTRA_BLOCKLIST_ENV`] still applies on top, as an override.
+pub const ALLOWLIST_ENV: &str = "NETWORK_PLUGIN_ALLOWED_HOSTS";
+
+/// Operator-configurable allowlist. Same shape as [`Blocklist`]: a
+/// comma-separated list of literal IPs and/or bare hostnames. Empty (the
+/// default) means "no allowlist" — the built-in blocklist rules apply as
+/// usual.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Allowlist {
+    ips: HashSet<IpAddr>,
+    hosts: HashSet<String>,
+}
+
+impl Allowlist {
+    pub fn parse(raw: &str) -> Self {
+        let mut ips = HashSet::new();
+        let mut hosts = HashSet::new();
+        for entry in raw.split(',') {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                continue;
+            }
+            match entry.parse::<IpAddr>() {
+                Ok(ip) => {
+                    ips.insert(ip);
+                }
+                Err(_) => {
+                    hosts.insert(entry.to_lowercase());
+                }
+            }
+        }
+        Self { ips, hosts }
+    }
+
+    pub fn from_env() -> Self {
+        std::env::var(ALLOWLIST_ENV)
+            .map(|raw| Self::parse(&raw))
+            .unwrap_or_default()
+    }
+
+    /// True when no allowlist is configured — the built-in blocklist rules
+    /// apply as usual in that case.
+    pub fn is_empty(&self) -> bool {
+        self.ips.is_empty() && self.hosts.is_empty()
+    }
+
+    pub fn allows_host(&self, host: &str) -> bool {
+        self.hosts.contains(&host.to_lowercase())
+    }
+
+    pub fn allows_ip(&self, ip: &IpAddr) -> bool {
+        self.ips.contains(ip)
+    }
+}
+
 /// Returns true if `ip` must NOT be reachable from this plugin (loopback,
 /// private/RFC1918, link-local, or the `169.254.169.254` cloud metadata
 /// address). Called once per resolved IP for the request's host before any
@@ -134,6 +194,33 @@ mod tests {
     }
 
     #[test]
+    fn blocks_v6_loopback() {
+        assert!(is_blocked_ip("::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn blocks_v6_unique_local() {
+        // fc00::/7 (RFC 4193) — the v6 analogue of RFC1918.
+        assert!(is_blocked_ip("fd00::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn blocks_v6_link_local() {
+        assert!(is_blocked_ip("fe80::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn blocks_v6_multicast() {
+        assert!(is_blocked_ip("ff02::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn allows_v6_public_ip() {
+        // Cloudflare 1.1.1.1's AAAA.
+        assert!(!is_blocked_ip("2606:4700:4700::1111".parse().unwrap()));
+    }
+
+    #[test]
     fn allows_another_public_ip() {
         assert!(!is_blocked_ip(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))));
     }
@@ -164,5 +251,26 @@ mod tests {
     fn blocklist_from_env_empty_when_unset() {
         std::env::remove_var(EXTRA_BLOCKLIST_ENV);
         assert_eq!(Blocklist::from_env(), Blocklist::default());
+    }
+
+    #[test]
+    fn allowlist_empty_by_default() {
+        assert!(Allowlist::default().is_empty());
+    }
+
+    #[test]
+    fn allowlist_parses_ips_and_hosts() {
+        let al = Allowlist::parse("10.0.0.5, internal.corp");
+        assert!(!al.is_empty());
+        assert!(al.allows_ip(&IpAddr::V4(Ipv4Addr::new(10, 0, 0, 5))));
+        assert!(al.allows_host("internal.corp"));
+        assert!(al.allows_host("Internal.Corp"));
+    }
+
+    #[test]
+    fn allowlist_does_not_allow_unlisted() {
+        let al = Allowlist::parse("internal.corp");
+        assert!(!al.allows_host("example.com"));
+        assert!(!al.allows_ip(&IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9))));
     }
 }
