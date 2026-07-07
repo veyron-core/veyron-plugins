@@ -1,0 +1,42 @@
+# Example kernel config.yaml entry for the `ai` plugin.
+# Copy this block into the top-level `plugins:` list of the kernel's
+# config.yaml (see repo root config.yaml for the full schema).
+#
+# `ai` declares zero kernel permissions (see ROADMAP.md, "Decision: reuse
+# `network`, don't reinvent") — it calls out through the `network` plugin's
+# `http_request` action instead of opening its own sockets. So `network`
+# must also be registered and running for `ai` to do anything.
+#
+# `ai` does not read a config file itself — the only "configuration" is
+# whatever env vars are listed here, read at call time via the
+# `api_key_env` field a caller passes in each `chat_completion` request
+# (see src/handler.rs). Set one var per provider/account you want callers
+# to be able to reference by name.
+
+plugins:
+  - id: ai
+    binary: /opt/plugins/ai        # path to the built `ai` binary
+    restart: on-failure
+    max_restarts: 5
+    sandbox: true                  # ai opens no sockets itself; network does
+    env:
+      # Anthropic Messages API key. Callers reference this by name via
+      # "api_key_env": "ANTHROPIC_API_KEY" in their chat_completion request.
+      - ANTHROPIC_API_KEY=sk-ant-...
+      # OpenAI (or OpenAI-compatible: OpenRouter, self-hosted gateways) key.
+      - OPENAI_API_KEY=sk-...
+      # OpenRouter also speaks the openai-compatible shape; give it its own
+      # var if you want callers to pick a specific account/key by name.
+      # - OPENROUTER_API_KEY=sk-or-...
+      # Local Ollama needs no auth — point base_url at it in the request
+      # ("base_url": "http://localhost:11434/v1") and set api_key_env to any
+      # unset/empty var name; the openai-compatible adapter omits the
+      # Authorization header entirely when the resolved key is empty.
+      # Also requires network's own config: loopback is blocked by its
+      # built-in SSRF ranges, so its `env:` needs
+      # NETWORK_PLUGIN_ALLOWED_HOSTS=localhost,127.0.0.1 (see
+      # plugins/network/config.example.yaml) or the request fails.
+      # - OLLAMA_API_KEY=
+    grace_seconds: 10
+    max_procs: 64
+    max_vmem_mb: 512
