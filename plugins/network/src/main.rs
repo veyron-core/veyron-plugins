@@ -14,6 +14,12 @@ use veyron_sdk::{Plugin, VeyronClient, VeyronError};
 struct NetworkPlugin {
     client: reqwest::Client,
     redirect_client: reqwest::Client,
+    /// Same instances handed to `SsrfSafeResolver` for both clients — kept
+    /// here too so `handle_http_request` can run the literal-IP gate
+    /// (`ssrf::check_literal_ip_host`) that the resolver can't cover, since
+    /// it's only ever invoked for hostnames needing DNS resolution.
+    extra_blocklist: network_plugin::ssrf::Blocklist,
+    allowlist: network_plugin::ssrf::Allowlist,
 }
 
 /// Operator-only opt-in proxy for all outbound requests. Deliberately not a
@@ -34,25 +40,66 @@ const CLIENT_IDENTITY_PATH_ENV: &str = "NETWORK_PLUGIN_CLIENT_IDENTITY_PATH";
 
 impl NetworkPlugin {
     fn new() -> Self {
+        let extra_blocklist = network_plugin::ssrf::Blocklist::from_env();
+        let allowlist = network_plugin::ssrf::Allowlist::from_env();
         Self {
-            client: Self::build_client(reqwest::redirect::Policy::none()),
-            redirect_client: Self::build_client(reqwest::redirect::Policy::limited(
-                request::MAX_REDIRECTS,
-            )),
+            client: Self::build_client(
+                reqwest::redirect::Policy::none(),
+                extra_blocklist.clone(),
+                allowlist.clone(),
+            ),
+            redirect_client: Self::build_client(
+                Self::redirect_policy(extra_blocklist.clone(), allowlist.clone()),
+                extra_blocklist.clone(),
+                allowlist.clone(),
+            ),
+            extra_blocklist,
+            allowlist,
         }
+    }
+
+    /// Redirect policy for `follow_redirects: true`. Can't rely on
+    /// `SsrfSafeResolver` alone here: it's a DNS resolver, and `reqwest`
+    /// skips DNS resolution (and so the resolver) whenever a hop's target
+    /// host is already a literal IP (`hyper-util`'s
+    /// `HttpConnector::call_async`) — a redirect to
+    /// `http://169.254.169.254/...` would otherwise sail through
+    /// unguarded. Every hop's URL is checked here in addition to the
+    /// resolver, which still runs for hostname hops.
+    fn redirect_policy(
+        extra_blocklist: network_plugin::ssrf::Blocklist,
+        allowlist: network_plugin::ssrf::Allowlist,
+    ) -> reqwest::redirect::Policy {
+        reqwest::redirect::Policy::custom(move |attempt| {
+            if attempt.previous().len() >= request::MAX_REDIRECTS {
+                return attempt.stop();
+            }
+            let host = attempt.url().host_str().unwrap_or_default();
+            match network_plugin::ssrf::check_literal_ip_host(host, &extra_blocklist, &allowlist)
+            {
+                Ok(()) => attempt.follow(),
+                Err(e) => attempt.error(e),
+            }
+        })
     }
 
     /// Builds one `reqwest::Client` with every operator-configured option
     /// (SSRF resolver, proxy, CA bundle, client identity) applied — only
     /// `redirect` differs between `client` and `redirect_client`, so both
     /// share the same TLS/proxy/SSRF posture instead of drifting apart.
-    fn build_client(redirect_policy: reqwest::redirect::Policy) -> reqwest::Client {
+    fn build_client(
+        redirect_policy: reqwest::redirect::Policy,
+        extra_blocklist: network_plugin::ssrf::Blocklist,
+        allowlist: network_plugin::ssrf::Allowlist,
+    ) -> reqwest::Client {
         // SSRF gating lives in `SsrfSafeResolver` (used for every connect,
         // including redirects) rather than a one-time pre-flight check —
-        // see module docs on `SsrfSafeResolver`.
+        // see module docs on `SsrfSafeResolver`. That covers hostnames;
+        // literal-IP hosts bypass it entirely (see `redirect_policy` and
+        // `handle_http_request`), so this is deliberately not the only gate.
         let resolver = handler::SsrfSafeResolver {
-            extra_blocklist: network_plugin::ssrf::Blocklist::from_env(),
-            allowlist: network_plugin::ssrf::Allowlist::from_env(),
+            extra_blocklist,
+            allowlist,
         };
         let mut builder = reqwest::Client::builder()
             .redirect(redirect_policy)
@@ -89,6 +136,17 @@ impl NetworkPlugin {
 
     async fn handle_http_request(&self, params_json: &[u8]) -> Result<Vec<u8>, String> {
         let params = request::parse_request(params_json)?;
+
+        // `SsrfSafeResolver` never runs for a literal-IP host (see its gate
+        // in `redirect_policy`'s doc comment) — this is the only check for
+        // the initial URL in that case. Rejecting here also avoids wasting
+        // `network`'s retry/backoff budget on a request that was never
+        // going anywhere.
+        if let Ok(url) = url::Url::parse(&params.url) {
+            let host = url.host_str().unwrap_or_default();
+            network_plugin::ssrf::check_literal_ip_host(host, &self.extra_blocklist, &self.allowlist)?;
+        }
+
         let client = if params.follow_redirects {
             &self.redirect_client
         } else {

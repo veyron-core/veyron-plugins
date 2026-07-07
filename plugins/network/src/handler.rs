@@ -11,6 +11,13 @@
 //! through the same authoritative, filtered lookup. Redirects are also
 //! disabled at the client level (`main.rs`) as defense in depth.
 //!
+//! `SsrfSafeResolver` only runs for hostnames, though — `reqwest`/`hyper`
+//! skip DNS resolution entirely when a URL's host is already a literal IP,
+//! so it never reaches this resolver at all. `main.rs` covers that gap with
+//! an explicit `ssrf::check_literal_ip_host` call, both before the initial
+//! request (`handle_http_request`) and on every redirect hop
+//! (`redirect_policy`).
+//!
 //! `fetch` itself has no SSRF gate, so its tests exercise the HTTP-send
 //! logic directly against a loopback mock server with a plain
 //! `reqwest::Client`, without depending on `ssrf::is_blocked_ip` (left as a

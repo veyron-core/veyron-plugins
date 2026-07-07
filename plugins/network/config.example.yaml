@@ -22,8 +22,13 @@ plugins:
       # Optional: switch from default-block to default-deny — only these
       # hosts/IPs are reachable at all (built-in private-range blocking is
       # skipped for listed entries; NETWORK_PLUGIN_EXTRA_BLOCKED_HOSTS still
-      # overrides on top).
-      # - NETWORK_PLUGIN_ALLOWED_HOSTS=10.0.5.10,internal-api.corp
+      # overrides on top). Only one NETWORK_PLUGIN_ALLOWED_HOSTS entry is
+      # read — merge every host you need into this one comma-separated list.
+      # `localhost,127.0.0.1` is required if the `ai` plugin's
+      # chat_completion openai-compatible adapter points at a local Ollama
+      # (or any other loopback-only LLM gateway) — loopback is blocked by
+      # the built-in ranges otherwise.
+      # - NETWORK_PLUGIN_ALLOWED_HOSTS=10.0.5.10,internal-api.corp,localhost,127.0.0.1
       # Optional: trust an extra CA (PEM, one or more certs concatenated)
       # for internal APIs signed by a private CA.
       # - NETWORK_PLUGIN_CA_BUNDLE_PATH=/etc/network-plugin/ca-bundle.pem

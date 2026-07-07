@@ -130,6 +130,44 @@ impl Allowlist {
     }
 }
 
+/// Gate for URLs whose host is already a literal IP address (as opposed to
+/// a hostname needing DNS resolution). `reqwest`/`hyper` skip the custom
+/// resolver entirely for literal-IP hosts (`hyper-util`'s
+/// `HttpConnector::call_async`: "If the host is already an IP addr ...
+/// skip resolving the dns and start connecting right away") — so
+/// `SsrfSafeResolver` (in `handler.rs`) never runs for them, and this is
+/// the only gate protecting against `http://127.0.0.1/...`,
+/// `http://169.254.169.254/...`, etc. Called both before the initial
+/// request and, for `follow_redirects: true`, on every redirect hop's
+/// target URL (see `main.rs`'s custom `reqwest::redirect::Policy`) — a
+/// redirect landing on a literal IP is just as much a bypass as the
+/// initial URL being one.
+///
+/// A `host` that isn't a literal IP (an ordinary hostname) returns `Ok`
+/// unconditionally — that case is handled by `SsrfSafeResolver` at DNS
+/// resolution time instead.
+pub fn check_literal_ip_host(
+    host: &str,
+    extra_blocklist: &Blocklist,
+    allowlist: &Allowlist,
+) -> Result<(), String> {
+    let Ok(ip) = host.parse::<IpAddr>() else {
+        return Ok(());
+    };
+    if extra_blocklist.blocks_ip(&ip) {
+        return Err(format!("host {host} is blocked by operator blocklist"));
+    }
+    let allowed = if !allowlist.is_empty() {
+        allowlist.allows_ip(&ip)
+    } else {
+        !is_blocked_ip(ip)
+    };
+    if !allowed {
+        return Err(format!("IP {ip} is blocked by SSRF policy"));
+    }
+    Ok(())
+}
+
 /// Returns true if `ip` must NOT be reachable from this plugin (loopback,
 /// private/RFC1918, link-local, or the `169.254.169.254` cloud metadata
 /// address). Called once per resolved IP for the request's host before any
@@ -272,5 +310,74 @@ mod tests {
         let al = Allowlist::parse("internal.corp");
         assert!(!al.allows_host("example.com"));
         assert!(!al.allows_ip(&IpAddr::V4(Ipv4Addr::new(9, 9, 9, 9))));
+    }
+
+    #[test]
+    fn literal_ip_host_blocks_private_range_by_default() {
+        let err = check_literal_ip_host("10.0.0.5", &Blocklist::default(), &Allowlist::default())
+            .unwrap_err();
+        assert!(err.contains("blocked"), "error was: {err}");
+    }
+
+    #[test]
+    fn literal_ip_host_blocks_loopback_by_default() {
+        let err = check_literal_ip_host("127.0.0.1", &Blocklist::default(), &Allowlist::default())
+            .unwrap_err();
+        assert!(err.contains("blocked"), "error was: {err}");
+    }
+
+    #[test]
+    fn literal_ip_host_blocks_cloud_metadata_by_default() {
+        let err = check_literal_ip_host(
+            "169.254.169.254",
+            &Blocklist::default(),
+            &Allowlist::default(),
+        )
+        .unwrap_err();
+        assert!(err.contains("blocked"), "error was: {err}");
+    }
+
+    #[test]
+    fn literal_ip_host_allows_public_ip_by_default() {
+        assert!(check_literal_ip_host("8.8.8.8", &Blocklist::default(), &Allowlist::default())
+            .is_ok());
+    }
+
+    #[test]
+    fn literal_ip_host_ignores_hostnames() {
+        assert!(check_literal_ip_host(
+            "example.com",
+            &Blocklist::default(),
+            &Allowlist::default()
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn literal_ip_host_honors_extra_blocklist_on_public_ip() {
+        let bl = Blocklist::parse("8.8.8.8");
+        let err = check_literal_ip_host("8.8.8.8", &bl, &Allowlist::default()).unwrap_err();
+        assert!(err.contains("operator blocklist"), "error was: {err}");
+    }
+
+    #[test]
+    fn literal_ip_host_allowlist_permits_private_ip() {
+        let al = Allowlist::parse("10.0.0.5");
+        assert!(check_literal_ip_host("10.0.0.5", &Blocklist::default(), &al).is_ok());
+    }
+
+    #[test]
+    fn literal_ip_host_allowlist_blocks_unlisted_ip() {
+        let al = Allowlist::parse("10.0.0.5");
+        let err = check_literal_ip_host("10.0.0.6", &Blocklist::default(), &al).unwrap_err();
+        assert!(err.contains("blocked"), "error was: {err}");
+    }
+
+    #[test]
+    fn literal_ip_host_extra_blocklist_overrides_allowlist() {
+        let al = Allowlist::parse("10.0.0.5");
+        let bl = Blocklist::parse("10.0.0.5");
+        let err = check_literal_ip_host("10.0.0.5", &bl, &al).unwrap_err();
+        assert!(err.contains("operator blocklist"), "error was: {err}");
     }
 }
