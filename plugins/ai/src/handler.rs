@@ -29,6 +29,17 @@ pub async fn handle_chat_completion(
 ) -> Result<Vec<u8>, String> {
     let params = request::parse_request(params_json)?;
 
+    let allowed_key_envs = request::parse_allowed_key_envs(
+        &std::env::var(request::ALLOWED_KEY_ENVS_ENV).unwrap_or_default(),
+    );
+    if !request::is_allowed_key_env(&params.api_key_env, &allowed_key_envs) {
+        return Err(format!(
+            "api_key_env '{}' is not in the operator's {} allowlist",
+            params.api_key_env,
+            request::ALLOWED_KEY_ENVS_ENV
+        ));
+    }
+
     let api_key = std::env::var(&params.api_key_env).unwrap_or_default();
     if api_key.is_empty() {
         return Err(format!(

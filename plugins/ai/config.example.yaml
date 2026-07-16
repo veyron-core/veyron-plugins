@@ -20,6 +20,13 @@ plugins:
     max_restarts: 5
     sandbox: true                  # ai opens no sockets itself; network does
     env:
+      # Required: every env var name a caller is allowed to reference via
+      # api_key_env, comma-separated, exact match. Default-deny — omitting
+      # this rejects every chat_completion request. Without it a caller
+      # could name *any* env var this process has (not just a provider
+      # key) and get its value sent straight into an outbound request
+      # header to a caller-controlled base_url.
+      - AI_PLUGIN_ALLOWED_KEY_ENVS=ANTHROPIC_API_KEY,OPENAI_API_KEY,OLLAMA_API_KEY
       # Anthropic Messages API key. Callers reference this by name via
       # "api_key_env": "ANTHROPIC_API_KEY" in their chat_completion request.
       - ANTHROPIC_API_KEY=sk-ant-...

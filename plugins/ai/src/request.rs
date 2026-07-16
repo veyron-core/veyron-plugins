@@ -12,6 +12,31 @@ pub const MAX_MAX_TOKENS: u32 = 8192;
 
 pub const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
 
+/// Operator-supplied allowlist of env var names a caller's `api_key_env`
+/// may name. Comma-separated, exact (case-sensitive) match. Default-deny:
+/// unset or empty means no `api_key_env` value is accepted — a caller
+/// could otherwise name *any* environment variable in the `ai` process
+/// (an unrelated secret, not just a provider key) and have its value sent
+/// straight into an outbound request header to a caller-controlled
+/// `base_url`, exfiltrating it.
+pub const ALLOWED_KEY_ENVS_ENV: &str = "AI_PLUGIN_ALLOWED_KEY_ENVS";
+
+/// Parse [`ALLOWED_KEY_ENVS_ENV`]'s raw value into the set of permitted
+/// `api_key_env` names.
+pub fn parse_allowed_key_envs(raw: &str) -> std::collections::HashSet<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// True if `name` is permitted as an `api_key_env` value, per the
+/// operator's [`ALLOWED_KEY_ENVS_ENV`] allowlist.
+pub fn is_allowed_key_env(name: &str, allowed: &std::collections::HashSet<String>) -> bool {
+    allowed.contains(name)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Message {
     pub role: String,
@@ -200,5 +225,36 @@ mod tests {
         body.as_object_mut().unwrap().remove("api_key_env");
         let err = parse_request(body.to_string().as_bytes()).unwrap_err();
         assert!(err.contains("api_key_env"), "error was: {err}");
+    }
+
+    #[test]
+    fn allowed_key_envs_empty_by_default() {
+        assert!(parse_allowed_key_envs("").is_empty());
+    }
+
+    #[test]
+    fn allowed_key_envs_parses_comma_list() {
+        let allowed = parse_allowed_key_envs("ANTHROPIC_API_KEY, OPENAI_API_KEY ,,");
+        assert!(is_allowed_key_env("ANTHROPIC_API_KEY", &allowed));
+        assert!(is_allowed_key_env("OPENAI_API_KEY", &allowed));
+        assert_eq!(allowed.len(), 2);
+    }
+
+    #[test]
+    fn is_allowed_key_env_rejects_unlisted_name() {
+        let allowed = parse_allowed_key_envs("ANTHROPIC_API_KEY");
+        assert!(!is_allowed_key_env("AWS_SECRET_ACCESS_KEY", &allowed));
+    }
+
+    #[test]
+    fn is_allowed_key_env_is_case_sensitive() {
+        let allowed = parse_allowed_key_envs("ANTHROPIC_API_KEY");
+        assert!(!is_allowed_key_env("anthropic_api_key", &allowed));
+    }
+
+    #[test]
+    fn is_allowed_key_env_rejects_everything_when_empty() {
+        let allowed = parse_allowed_key_envs("");
+        assert!(!is_allowed_key_env("ANTHROPIC_API_KEY", &allowed));
     }
 }

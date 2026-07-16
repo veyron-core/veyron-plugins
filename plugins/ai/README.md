@@ -40,9 +40,11 @@ Request (`ActionRequest.params_json`):
 - `model` — required, non-empty.
 - `api_key_env` — name of an environment variable the `ai` **process**
   reads at call time, not a literal key. The caller never puts the raw key
-  in the payload. Missing/unset → `ACTION_ERROR`, the key value never
-  appears in any error string. See "Configuration" below for where that
-  env var actually comes from.
+  in the payload. Must appear in the operator's `AI_PLUGIN_ALLOWED_KEY_ENVS`
+  allowlist (see "Configuration") — otherwise a caller could name *any* env
+  var the process has, not just a provider key, and exfiltrate it via a
+  caller-controlled `base_url`. Not allowlisted, or unset → `ACTION_ERROR`;
+  the key value never appears in any error string.
 - `messages` — required, non-empty, `{role, content}` pairs.
 - `max_tokens` — optional, default `1024`, capped at `8192`.
 - `timeout_ms` — optional, default and cap `30000`.
@@ -55,16 +57,24 @@ providers:
 ```
 
 Errors → `ACTION_ERROR` with a human-readable message: malformed/missing
-request fields, unset `api_key_env`, malformed provider JSON, non-2xx HTTP
-status from the provider, or any error `network`'s `http_request` itself
-returns (SSRF block, timeout, DNS failure, connection refused).
+request fields, `api_key_env` not on the operator's allowlist or unset,
+malformed provider JSON, non-2xx HTTP status from the provider, or any
+error `network`'s `http_request` itself returns (SSRF block, timeout, DNS
+failure, connection refused).
 
 ## Configuration
 
 `ai` reads no config file itself. The only configuration is environment
 variables set in the kernel's `config.yaml`, under this plugin's `env:`
-list — see `config.example.yaml` in this directory. A caller picks which
-one to use per-request via `api_key_env`:
+list — see `config.example.yaml` in this directory.
+
+`AI_PLUGIN_ALLOWED_KEY_ENVS` is **required**: a comma-separated,
+exact-match allowlist of every env var name a caller's `api_key_env` may
+reference. Default-deny — omit it and every `chat_completion` request is
+rejected. Without this allowlist a caller could set `api_key_env` to any
+env var the `ai` process happens to have (an unrelated secret, not just a
+provider key) and have its value sent straight into an outbound request
+header to a `base_url` the caller also controls.
 
 ```yaml
 plugins:
@@ -72,6 +82,7 @@ plugins:
     binary: /opt/plugins/ai
     sandbox: true
     env:
+      - AI_PLUGIN_ALLOWED_KEY_ENVS=ANTHROPIC_API_KEY,OPENAI_API_KEY
       - ANTHROPIC_API_KEY=sk-ant-...
       - OPENAI_API_KEY=sk-...
 ```
@@ -91,9 +102,11 @@ Point `base_url` at Ollama's OpenAI-compatible endpoint and use `provider:
 }
 ```
 
-Ollama needs no auth — set `api_key_env` to any unset/empty variable name;
-the `openai` adapter omits the `Authorization` header entirely when the
-resolved key is empty.
+Ollama needs no auth — pick any unset/empty variable name for
+`api_key_env`, add it to `AI_PLUGIN_ALLOWED_KEY_ENVS` like any other (still
+required even though the value itself is empty), and leave the var unset
+or empty in `env:`; the `openai` adapter omits the `Authorization` header
+entirely when the resolved key is empty.
 
 This also requires `network`'s own config: its built-in SSRF blocklist
 blocks loopback by default, so its `env:` needs
@@ -107,7 +120,7 @@ model fails.
 
 ## Testing
 
-`cargo test` — 19 unit tests, no live network (provider adapters are
+`cargo test` — 24 unit tests, no live network (provider adapters are
 tested against fixture JSON; `network`'s own tests cover the actual HTTP
 send). End-to-end behavior (this README's examples, plus the SSRF
 limitation above) was verified against a real kernel + `network` + `ai` +
