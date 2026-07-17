@@ -48,17 +48,34 @@ pub fn sanitize_caller_id(caller_plugin_id: &str) -> Result<&str, String> {
 /// deliberately over-broad (rejects `SELECT 'attach'` too) since the only
 /// cost of a false positive is a caller rewording their SQL, while a false
 /// negative would be a real isolation bypass.
+///
+/// A quote character immediately before/after "attach" IS a valid word
+/// boundary (quotes are never part of an identifier or keyword) — so
+/// `ATTACH'evil.db' AS x` (no space between the keyword and the quote,
+/// valid SQLite syntax) still counts as a whole-word match. The one
+/// exception: if "attach" is preceded by a quote AND followed by that same
+/// quote character (e.g. `'attach'`), then "attach" is the entire contents
+/// of a quoted string literal, not a bare keyword, so that case is not
+/// flagged.
 pub fn rejects_attach(sql: &str) -> bool {
     let lower = sql.to_ascii_lowercase();
     let bytes = lower.as_bytes();
     let needle = b"attach";
     let mut i = 0;
     while let Some(pos) = find_from(bytes, needle, i) {
-        let before_ok = pos == 0 || !bytes[pos - 1].is_ascii_alphanumeric() && bytes[pos - 1] != b'_';
+        let before_ok = pos == 0 || (!bytes[pos - 1].is_ascii_alphanumeric() && bytes[pos - 1] != b'_');
         let after = pos + needle.len();
         let after_ok = after == bytes.len()
-            || (!bytes[after].is_ascii_alphanumeric() && bytes[after] != b'_' && bytes[after] != b'\'' && bytes[after] != b'"');
-        if before_ok && after_ok {
+            || (!bytes[after].is_ascii_alphanumeric() && bytes[after] != b'_');
+
+        let quote_before = (pos > 0 && (bytes[pos - 1] == b'\'' || bytes[pos - 1] == b'"'))
+            .then(|| bytes[pos - 1]);
+        let quote_after = (after < bytes.len() && (bytes[after] == b'\'' || bytes[after] == b'"'))
+            .then(|| bytes[after]);
+        let is_quoted_literal_contents =
+            matches!((quote_before, quote_after), (Some(a), Some(b)) if a == b);
+
+        if before_ok && after_ok && !is_quoted_literal_contents {
             return true;
         }
         i = pos + 1;
@@ -87,9 +104,14 @@ impl DbPools {
     pub async fn pool_for(&self, caller_plugin_id: &str) -> Result<SqlitePool, String> {
         let caller_id = sanitize_caller_id(caller_plugin_id)?;
 
-        let mut pools = self.pools.lock().await;
-        if let Some(pool) = pools.get(caller_id) {
-            return Ok(pool.clone());
+        // Fast path: only hold the lock long enough to check the cache, so a
+        // slow first connect for one caller can't block every other
+        // caller's pool_for call.
+        {
+            let pools = self.pools.lock().await;
+            if let Some(pool) = pools.get(caller_id) {
+                return Ok(pool.clone());
+            }
         }
 
         std::fs::create_dir_all(&self.config.data_dir)
@@ -102,6 +124,11 @@ impl DbPools {
             .busy_timeout(std::time::Duration::from_millis(self.config.busy_timeout_ms))
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
 
+        // Unlocked: real file I/O + connection setup. Two callers racing on
+        // the same caller_id will both open a connection to the same file
+        // and both run the idempotent `CREATE TABLE IF NOT EXISTS` DDL —
+        // WAL mode allows concurrent connections to the same SQLite file,
+        // so this can't produce two db files or a conflicting table-init.
         let pool = SqlitePoolOptions::new()
             .max_connections(self.config.pool_size)
             .connect_with(options)
@@ -113,8 +140,17 @@ impl DbPools {
             .await
             .map_err(|e| format!("failed to init kv table for {caller_id}: {e}"))?;
 
-        pools.insert(caller_id.to_string(), pool.clone());
-        Ok(pool)
+        // Re-lock only to insert. If another caller raced us and already
+        // cached a pool for this caller_id, keep the winner's pool (both
+        // are equally valid — same file, same DDL already applied) and let
+        // our redundant one be dropped, so exactly one pool per caller_id
+        // ends up cached.
+        let mut pools = self.pools.lock().await;
+        let winner = pools
+            .entry(caller_id.to_string())
+            .or_insert_with(|| pool.clone())
+            .clone();
+        Ok(winner)
     }
 }
 
@@ -144,12 +180,18 @@ mod tests {
         assert!(rejects_attach("ATTACH DATABASE 'x' AS y"));
         assert!(rejects_attach("attach database 'x' as y"));
         assert!(rejects_attach("select 1; attach database 'x' as y"));
+        // No whitespace between the keyword and the quote — still valid
+        // SQLite syntax, and previously bypassed detection.
+        assert!(rejects_attach("ATTACH'evil.db' AS x"));
     }
 
     #[test]
     fn attach_detection_ignores_substrings() {
         assert!(!rejects_attach("select * from attachments"));
         assert!(!rejects_attach("select 'attach' as label"));
+        // Bare quoted word: "attach" is the entire contents of a string
+        // literal, not a statement keyword.
+        assert!(!rejects_attach("select 'attach'"));
     }
 
     #[tokio::test]
