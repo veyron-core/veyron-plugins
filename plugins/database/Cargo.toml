@@ -1,0 +1,28 @@
+[package]
+name = "database-plugin"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "database_plugin"
+path = "src/lib.rs"
+
+[[bin]]
+name = "database"
+path = "src/main.rs"
+
+[dependencies]
+veyron-sdk = { path = "/home/behzod/projects/veyron-core/veyron/sdk/rust" }
+veyron-wire = { path = "/home/behzod/projects/veyron-core/veyron/wire" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runtime-tokio"] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[patch.crates-io]
+veyron-wire = { path = "/home/behzod/projects/veyron-core/veyron/wire" }
