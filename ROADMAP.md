@@ -12,6 +12,7 @@ file is the cross-plugin picture only.
 | `ping-pong-rs` | `plugins/ping-pong-rs/` | — | example plugin, no real capability |
 | `network` | `plugins/network/` | — | outbound HTTP, `PERMISSION_NETWORK`, SSRF-guarded |
 | `ai` | `plugins/ai/` | `network` | LLM chat completion (anthropic/openai-compatible), zero permissions itself |
+| `database` | `plugins/database/` | — | KV/SQL storage primitive, `PERMISSION_STORAGE`, per-caller SQLite file isolation |
 
 ## Planned
 
@@ -23,7 +24,6 @@ Dependency order — each row can start once everything in "depends on" ships.
 | `filesystem` | sandboxed file read/write + read-only browse (`ls`/`cat` equivalents: `fs_list`/`fs_read`) — no exec, no shell | — | `PERMISSION_FILES_READ`/`PERMISSION_FILES_WRITE` (existing) |
 | `stt` | speech-to-text | — | `PERMISSION_AUDIO` (existing) |
 | `tts` | text-to-speech | — | `PERMISSION_AUDIO` (existing) |
-| `database` | KV/SQL storage primitive (`db_get`/`db_set`/`db_query`/`db_delete`) | — | `PERMISSION_STORAGE` (new) |
 | `scheduler` | fire an action/event once after a delay, or repeatedly on a cron expr | `database` (persist schedule state across restarts) | `PERMISSION_SCHEDULER` (existing) |
 | `vector-db` | embedding upsert/similarity search (`vec_upsert`/`vec_query`) | — | own storage backend, standalone |
 | `search` | web search (grounding, not just fetch) | `network` | none beyond `network`'s |
