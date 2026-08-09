@@ -10,6 +10,11 @@ v1 supports two providers: `anthropic` (Claude Messages API) and `openai`
 (OpenAI-compatible chat completions — covers OpenAI, OpenRouter, and local
 Ollama, since all three speak the same wire shape).
 
+**See [`USAGE.md`](./USAGE.md)** for the caller-facing guide: full
+`chat_completion` request/response reference, per-provider examples, every
+error message a caller can hit, and common patterns (multi-turn,
+provider-agnostic calls, system prompts).
+
 ## Operator note
 
 `ai` declares zero kernel permissions (`plugin.json`: `"permissions": []`)

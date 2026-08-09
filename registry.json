@@ -41,5 +41,18 @@
     "sha256": "1d53d7b83fe162e97382da3973b55ad5e407dad02f383c3e729de59c9771cbad",
     "min_kernel_version": "0.1.0",
     "max_kernel_version": "*"
+  },
+  {
+    "id": "004",
+    "slug": "ai",
+    "name": "AI",
+    "description": "Provider-agnostic LLM chat completion (chat_completion) for anthropic + openai-compatible providers, routed through the network plugin; declares no permissions itself.",
+    "version": "0.1.0",
+    "permissions": [],
+    "archive_url": "https://raw.githubusercontent.com/veyron-core/veyron-plugins/main/dist/ai-0.1.0.zip",
+    "source_url": "https://github.com/veyron-core/veyron-plugins/tree/main/plugins/ai",
+    "sha256": "3fde5a6bf1944612570f28dfa8887f6f03a874910863e22a194db6cfdb596f9e",
+    "min_kernel_version": "0.1.0",
+    "max_kernel_version": "*"
   }
 ]
