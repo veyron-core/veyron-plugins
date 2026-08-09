@@ -23,11 +23,19 @@ shared/default namespace.
 
 `db_query` runs against the caller's own database file only — `ATTACH` is
 rejected (whole-word, case-insensitive keyword pre-check). Positional binds
-use `?1`, `?2`, …. `SELECT`/`WITH`/`PRAGMA` return typed `rows`;
-everything else returns `rows_affected`.
+use `?1`, `?2`, …. Any statement that yields rows returns them in `rows`
+(including `INSERT … RETURNING`), and every statement reports `rows_affected`
+— there is no `starts_with("select")` guess, so row-producing writes are not
+dropped.
 
 Values are stored as JSON text; `db_get`/`db_batch_get` return the decoded
-JSON value, not the raw string.
+JSON value, not the raw string. A raw `db_query` against the `kv` table sees
+that JSON text verbatim (a stored string comes back quoted, e.g. `"bar"`).
+
+**See [`USAGE.md`](./USAGE.md)** for per-action request/response examples,
+every error message a caller can hit, column/param type mapping, and common
+patterns (building your own tables, transactions, TTL, recovering from a full
+quota).
 
 ## Config
 
@@ -41,10 +49,22 @@ plugin). Copy `config.example.yaml` for the documented defaults.
 | `DATABASE_PLUGIN_POOL_SIZE` | `4` | connections per caller pool |
 | `DATABASE_PLUGIN_BUSY_TIMEOUT_MS` | `5000` | SQLite busy timeout |
 | `DATABASE_PLUGIN_MAX_VALUE_BYTES` | `1048576` (1 MiB) | `db_set` value size cap |
-| `DATABASE_PLUGIN_MAX_RESPONSE_BYTES` | `4194304` (4 MiB) | `db_query` result size cap |
+| `DATABASE_PLUGIN_MAX_RESPONSE_BYTES` | `4194304` (4 MiB) | `db_query`/`db_batch_get` result size cap |
+| `DATABASE_PLUGIN_MAX_DB_BYTES` | `268435456` (256 MiB) | hard per-caller disk quota; `0` disables |
 
 Size caps reject — they never truncate. An oversized `db_set` value or
-`db_query` result is an `ACTION_ERROR`.
+`db_query`/`db_batch_get` result is an `ACTION_ERROR`.
+
+The disk quota is a different, stronger guarantee: `max_value_bytes` and
+`max_response_bytes` are application-layer checks that only bound one value or
+one response, and a raw `db_query` write can sidestep `max_value_bytes`
+entirely (`insert ... values (value || value)`, `zeroblob(...)`).
+`max_db_bytes` is enforced by SQLite itself via `PRAGMA max_page_count`: any
+write that would grow the caller's `.db` file past the ceiling fails with
+`SQLITE_FULL`, no matter which action issued it. A full caller recovers by
+freeing space (deleting rows); note SQLite does not return freed pages to the
+OS without a `VACUUM`, so the file stays at its high-water mark but the freed
+pages are reused for subsequent writes.
 
 ## Concurrency
 

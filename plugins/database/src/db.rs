@@ -9,12 +9,23 @@ pub struct DbConfig {
     pub data_dir: PathBuf,
     pub pool_size: u32,
     pub busy_timeout_ms: u64,
+    /// Hard per-caller storage ceiling, enforced by SQLite itself via
+    /// `PRAGMA max_page_count` (writes past it fail with `SQLITE_FULL`).
+    /// This is the real cap on raw-SQL writes — `max_value_bytes` only
+    /// guards the `db_set` fast path and is trivially bypassable with a raw
+    /// `INSERT`. `0` disables the quota.
+    pub max_db_bytes: u64,
 }
 
 pub struct DbPools {
     config: DbConfig,
     pools: Mutex<HashMap<String, SqlitePool>>,
 }
+
+/// Fixed SQLite page size, set explicitly so the byte→page arithmetic for
+/// the `max_page_count` quota (see `pool_for`) is exact rather than
+/// depending on the compiled-in default.
+const PAGE_SIZE: u32 = 4096;
 
 const KV_TABLE_DDL: &str = "create table if not exists kv (\
     key TEXT PRIMARY KEY, \
@@ -118,11 +129,24 @@ impl DbPools {
             .map_err(|e| format!("failed to create data_dir: {e}"))?;
         let db_path = self.config.data_dir.join(format!("{caller_id}.db"));
 
-        let options = SqliteConnectOptions::from_str(&format!("sqlite://{}", db_path.display()))
+        let mut options = SqliteConnectOptions::from_str(&format!("sqlite://{}", db_path.display()))
             .map_err(|e| format!("invalid sqlite path: {e}"))?
             .create_if_missing(true)
             .busy_timeout(std::time::Duration::from_millis(self.config.busy_timeout_ms))
+            .page_size(PAGE_SIZE)
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
+
+        // Hard per-caller storage cap (bug #1). `PRAGMA max_page_count` is
+        // enforced by SQLite itself — a write that would grow the file past
+        // the limit fails with SQLITE_FULL — so it bounds raw `db_query`
+        // INSERTs that sidestep the `db_set`-only `max_value_bytes` check.
+        // sqlx replays these pragmas on every pooled connection (see
+        // SqliteConnectOptions::pragma_string), so the ceiling holds across
+        // the whole pool, not just the first connection. `0` disables it.
+        if self.config.max_db_bytes > 0 {
+            let max_pages = (self.config.max_db_bytes / PAGE_SIZE as u64).max(1);
+            options = options.pragma("max_page_count", max_pages.to_string());
+        }
 
         // Unlocked: real file I/O + connection setup. Two callers racing on
         // the same caller_id will both open a connection to the same file
@@ -201,6 +225,7 @@ mod tests {
             data_dir: dir.path().to_path_buf(),
             pool_size: 2,
             busy_timeout_ms: 1000,
+            max_db_bytes: 0,
         });
 
         let pool_a = pools.pool_for("caller_a").await.unwrap();
@@ -236,6 +261,7 @@ mod tests {
             data_dir: dir.path().to_path_buf(),
             pool_size: 2,
             busy_timeout_ms: 1000,
+            max_db_bytes: 0,
         });
         assert!(pools.pool_for("../escape").await.is_err());
         assert!(pools.pool_for("").await.is_err());

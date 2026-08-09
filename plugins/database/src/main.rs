@@ -44,10 +44,15 @@ fn load_config() -> DbConfig {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(5000);
+    let max_db_bytes = std::env::var("DATABASE_PLUGIN_MAX_DB_BYTES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(256 * 1024 * 1024);
     DbConfig {
         data_dir: data_dir.into(),
         pool_size,
         busy_timeout_ms,
+        max_db_bytes,
     }
 }
 
@@ -262,6 +267,7 @@ mod tests {
                 data_dir: dir.path().to_path_buf(),
                 pool_size: 4,
                 busy_timeout_ms: 2000,
+                max_db_bytes: 0,
             },
             1024 * 1024,
             4 * 1024 * 1024,
@@ -346,6 +352,7 @@ mod tests {
                 data_dir: dir.path().to_path_buf(),
                 pool_size: 4,
                 busy_timeout_ms: 2000,
+                max_db_bytes: 0,
             },
             1024 * 1024,
             4 * 1024 * 1024,
