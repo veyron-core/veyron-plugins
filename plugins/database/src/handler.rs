@@ -1,7 +1,8 @@
 use crate::db::{self, DbConfig, DbPools};
 use crate::request::{parse_request, DbRequest};
+use futures_util::TryStreamExt;
 use serde_json::{json, Value};
-use sqlx::{Column, Row, SqlitePool, TypeInfo, ValueRef};
+use sqlx::{Column, Either, Executor, Row, SqlitePool, TypeInfo, ValueRef};
 
 pub struct Handler {
     pools: DbPools,
@@ -94,6 +95,11 @@ impl Handler {
 
     async fn handle_batch_get(&self, pool: &SqlitePool, keys: &[String]) -> Result<Value, String> {
         let mut values = serde_json::Map::new();
+        // Track the serialized size as we go and reject once it crosses
+        // max_response_bytes, matching db_query. Without this a caller could
+        // pull an unbounded blob back in one batch even though every
+        // individual value passed the db_set cap (bug #2).
+        let mut running_bytes: usize = 0;
         for key in keys {
             let row: Option<(String,)> = sqlx::query_as("select value from kv where key = ?1")
                 .bind(key)
@@ -105,6 +111,16 @@ impl Handler {
                     .map_err(|e| format!("corrupt stored value for key {key:?}: {e}"))?,
                 None => Value::Null,
             };
+            // Account for the value plus its key and JSON punctuation.
+            running_bytes += serde_json::to_vec(&value).map_err(|e| e.to_string())?.len()
+                + key.len()
+                + 4;
+            if running_bytes > self.max_response_bytes {
+                return Err(format!(
+                    "batch_get result exceeds max_response_bytes (> {})",
+                    self.max_response_bytes
+                ));
+            }
             values.insert(key.clone(), value);
         }
         Ok(json!({"values": Value::Object(values)}))
@@ -115,37 +131,52 @@ impl Handler {
             return Err("ATTACH is not permitted in db_query statements".to_string());
         }
 
-        let is_select = sql.trim_start().to_ascii_lowercase().starts_with("select")
-            || sql.trim_start().to_ascii_lowercase().starts_with("pragma")
-            || sql.trim_start().to_ascii_lowercase().starts_with("with");
-
-        if is_select {
-            let mut query = sqlx::query(sql);
-            for p in params {
-                query = bind_json_param(query, p);
-            }
-            let rows = query.fetch_all(pool).await.map_err(|e| e.to_string())?;
-            let mut json_rows = Vec::with_capacity(rows.len());
-            for row in &rows {
-                json_rows.push(row_to_json(row)?);
-            }
-            let encoded = serde_json::to_vec(&json_rows).map_err(|e| e.to_string())?;
-            if encoded.len() > self.max_response_bytes {
-                return Err(format!(
-                    "query result exceeds max_response_bytes ({} > {})",
-                    encoded.len(),
-                    self.max_response_bytes
-                ));
-            }
-            Ok(json!({"rows": json_rows, "rows_affected": 0}))
-        } else {
-            let mut query = sqlx::query(sql);
-            for p in params {
-                query = bind_json_param(query, p);
-            }
-            let outcome = query.execute(pool).await.map_err(|e| e.to_string())?;
-            Ok(json!({"rows": [], "rows_affected": outcome.rows_affected()}))
+        // One streaming pass over `fetch_many`, which yields `Either::Right`
+        // for each result row and `Either::Left` for the statement's final
+        // query result (carrying `rows_affected`). This replaces the old
+        // `starts_with("select")` sniff, which misrouted `INSERT ...
+        // RETURNING` (a row-producing write) to the execute-only path and
+        // dropped its rows (bug #4). Streaming also lets us enforce
+        // `max_response_bytes` incrementally instead of after materializing
+        // every row (bug #3): `running_bytes` tracks the serialized size of
+        // the rows collected so far and bails the moment it crosses the cap,
+        // so a runaway `SELECT` can't balloon memory before the check fires.
+        let mut query = sqlx::query(sql);
+        for p in params {
+            query = bind_json_param(query, p);
         }
+
+        let mut stream = pool.fetch_many(query);
+        let mut json_rows: Vec<Value> = Vec::new();
+        let mut running_bytes: usize = 0;
+        let mut rows_affected: u64 = 0;
+
+        while let Some(item) = stream.try_next().await.map_err(|e| e.to_string())? {
+            match item {
+                Either::Left(result) => {
+                    rows_affected += result.rows_affected();
+                }
+                Either::Right(row) => {
+                    let value = row_to_json(&row)?;
+                    // Account for the row plus its `,` separator against the
+                    // cap before pushing, so we never hold more than one
+                    // oversized row's worth past the limit.
+                    running_bytes += serde_json::to_vec(&value)
+                        .map_err(|e| e.to_string())?
+                        .len()
+                        + 1;
+                    if running_bytes > self.max_response_bytes {
+                        return Err(format!(
+                            "query result exceeds max_response_bytes (> {})",
+                            self.max_response_bytes
+                        ));
+                    }
+                    json_rows.push(value);
+                }
+            }
+        }
+
+        Ok(json!({"rows": json_rows, "rows_affected": rows_affected}))
     }
 }
 
@@ -197,6 +228,7 @@ mod tests {
                 data_dir: dir.to_path_buf(),
                 pool_size: 2,
                 busy_timeout_ms: 1000,
+                max_db_bytes: 0,
             },
             1024,
             4096,
@@ -355,5 +387,128 @@ mod tests {
         let h = handler(dir.path());
         let err = h.handle("caller_a", "db_frobnicate", b"{}").await.unwrap_err();
         assert!(err.contains("db_frobnicate"), "error was: {err}");
+    }
+
+    // Fix #4: a write with a RETURNING clause is still a row-producing
+    // statement. The old `starts_with("select")` heuristic routed it to the
+    // `execute()` path, so the returned rows were silently dropped and the
+    // caller only ever saw `rows_affected`. This asserts the rows come back.
+    #[tokio::test]
+    async fn insert_returning_yields_the_returned_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = handler(dir.path());
+        let out = h
+            .handle(
+                "caller_a",
+                "db_query",
+                br#"{"sql": "insert into kv (key, value, updated_at) values ('rk', '\"v\"', 0) returning key, updated_at"}"#,
+            )
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["rows"][0]["key"], "rk", "RETURNING rows were dropped: {v}");
+        assert_eq!(v["rows"][0]["updated_at"], 0);
+    }
+
+    // Fix #2: db_batch_get had no response-size cap, unlike db_query. A caller
+    // storing many values (each individually under max_value_bytes) could pull
+    // an unbounded blob back in one batch. With max_response_bytes = 4096 in
+    // the test handler, ten ~900-byte values must trip the cap.
+    #[tokio::test]
+    async fn batch_get_rejects_oversized_total_response() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = handler(dir.path());
+        let big = "x".repeat(900);
+        let mut keys = Vec::new();
+        for i in 0..10 {
+            let key = format!("k{i}");
+            let params =
+                serde_json::to_vec(&serde_json::json!({"key": key, "value": big})).unwrap();
+            h.handle("caller_a", "db_set", &params).await.unwrap();
+            keys.push(key);
+        }
+        let params = serde_json::to_vec(&serde_json::json!({"keys": keys})).unwrap();
+        let err = h.handle("caller_a", "db_batch_get", &params).await.unwrap_err();
+        assert!(err.contains("max_response_bytes"), "error was: {err}");
+    }
+
+    // Fix #3 regression guard: the streaming rewrite of handle_query must keep
+    // rejecting oversized SELECT results. Ten ~900-byte rows serialized exceed
+    // the 4096-byte test cap.
+    #[tokio::test]
+    async fn query_rejects_oversized_select_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = handler(dir.path());
+        let big = "x".repeat(900);
+        for i in 0..10 {
+            let params =
+                serde_json::to_vec(&serde_json::json!({"key": format!("k{i}"), "value": big}))
+                    .unwrap();
+            h.handle("caller_a", "db_set", &params).await.unwrap();
+        }
+        let err = h
+            .handle("caller_a", "db_query", br#"{"sql": "select key, value from kv"}"#)
+            .await
+            .unwrap_err();
+        assert!(err.contains("max_response_bytes"), "error was: {err}");
+    }
+
+    // Fix #1: max_value_bytes only guards db_set; a caller can bypass it with a
+    // raw INSERT. The real cap is a per-caller disk quota enforced by SQLite
+    // (PRAGMA max_page_count). With a 64 KiB quota, a loop of raw-ish writes
+    // must eventually be rejected rather than growing the file unbounded.
+    #[tokio::test]
+    async fn per_caller_disk_quota_rejects_writes_past_the_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = Handler::new(
+            DbConfig {
+                data_dir: dir.path().to_path_buf(),
+                pool_size: 2,
+                busy_timeout_ms: 1000,
+                max_db_bytes: 64 * 1024,
+            },
+            1024,
+            4096,
+        );
+        let big = "x".repeat(900);
+        let mut hit_full = false;
+        for i in 0..2000 {
+            let params =
+                serde_json::to_vec(&serde_json::json!({"key": format!("k{i}"), "value": big}))
+                    .unwrap();
+            if h.handle("caller_full", "db_set", &params).await.is_err() {
+                hit_full = true;
+                break;
+            }
+        }
+        assert!(hit_full, "expected a disk-full rejection under the 64 KiB quota");
+    }
+
+    // Characterization test backing the transactions section of USAGE.md: a
+    // single db_query carrying several statements (a `begin; …; commit;`
+    // block) runs all of them on one pooled connection, in order, atomically.
+    // This is the documented way to get atomicity, since separate db_query
+    // calls may each land on a different connection from the pool. It also
+    // pins the multi-statement behavior so a future sqlx bump that drops it
+    // can't silently break the documented pattern.
+    #[tokio::test]
+    async fn multi_statement_query_runs_every_statement() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = handler(dir.path());
+        let out = h
+            .handle(
+                "caller_a",
+                "db_query",
+                br#"{"sql": "begin; insert into kv (key, value, updated_at) values ('a', '1', 0); insert into kv (key, value, updated_at) values ('b', '2', 0); commit;"}"#,
+            )
+            .await
+            .unwrap();
+        // The block committed both rows.
+        let count = h
+            .handle("caller_a", "db_query", br#"{"sql": "select count(*) as n from kv"}"#)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&count).unwrap();
+        assert_eq!(v["rows"][0]["n"], 2, "multi-statement block did not commit both rows: {}, out was {}", v, String::from_utf8_lossy(&out));
     }
 }
