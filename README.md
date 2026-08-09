@@ -9,6 +9,7 @@ kernel.
 |---|---|---|---|
 | `ping-pong` | `plugins/ping-pong-rs/` | none | Minimal example plugin that responds to ping actions. |
 | `network` | `plugins/network/` | `PERMISSION_NETWORK` | Outbound HTTP for plugins/kernel via one `http_request` action. HTTP-only v1 (no WebSocket). See `plugins/network/README.md`. |
+| `ai` | `plugins/ai/` | none | Provider-agnostic LLM chat completion (`chat_completion`) for anthropic + openai-compatible providers. Routes through `network`, declares no permissions itself. See `plugins/ai/README.md`. |
 | `database` | `plugins/database/` | `PERMISSION_STORAGE` | Per-caller-namespaced KV + raw SQL storage over SQLite, five `db_*` actions. See `plugins/database/README.md`. |
 
 ## Registry
