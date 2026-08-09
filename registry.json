@@ -26,5 +26,20 @@
     "sha256": "ee4469073ce285ca512c2663d44990d9186f6770eaf89aff82b0d94eba4d0174",
     "min_kernel_version": "0.1.0",
     "max_kernel_version": "*"
+  },
+  {
+    "id": "003",
+    "slug": "database",
+    "name": "Database",
+    "description": "Per-caller-namespaced KV + raw SQL storage over SQLite, five db_* actions, gated by PERMISSION_STORAGE.",
+    "version": "0.1.0",
+    "permissions": [
+      "storage"
+    ],
+    "archive_url": "https://raw.githubusercontent.com/veyron-core/veyron-plugins/main/dist/database-0.1.0.zip",
+    "source_url": "https://github.com/veyron-core/veyron-plugins/tree/main/plugins/database",
+    "sha256": "1d53d7b83fe162e97382da3973b55ad5e407dad02f383c3e729de59c9771cbad",
+    "min_kernel_version": "0.1.0",
+    "max_kernel_version": "*"
   }
 ]
