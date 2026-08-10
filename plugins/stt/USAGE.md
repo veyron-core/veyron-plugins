@@ -1,0 +1,186 @@
+# stt plugin — caller's guide
+
+Transcribe audio to text from any plugin. Two actions, two providers:
+`sherpa` (local, in-process, fully offline) and `openai` (cloud, routed
+through the `network` plugin). All results come back in one normalized
+shape regardless of provider.
+
+## `stt_transcribe`
+
+### Request
+
+`ActionRequest.params_json`:
+
+```json
+{
+  "provider": "openai",
+  "audio_base64": "<base64 of the audio bytes>",
+  "format": "wav",
+  "language": "en",
+  "prompt": "The transcript is about weather.",
+  "temperature": 0.0,
+  "api_key_env": "OPENAI_API_KEY",
+  "model": "whisper-1",
+  "timeout_ms": 30000
+}
+```
+
+Required:
+
+- `provider` — `"sherpa"` | `"openai"`.
+- `audio_base64` — the audio bytes, base64-encoded. Decoded size ≤ 25 MiB.
+
+Optional:
+
+- `format` — `sherpa`: `wav` (default) | `pcm`; `openai`: `wav` (default)
+  | `mp3` | `ogg`. Raw `pcm` (16-bit little-endian) needs `sample_rate_hz`
+  and `num_channels`; container formats carry their own.
+- `language` — ISO-639-1 hint, e.g. `"de"`. Letters only, normalized to
+  lowercase. Echoed back in the response.
+- `prompt` — Whisper-style context hint; `openai` only, ≤ 1000 chars.
+- `temperature` — `0.0`..=`1.0`; `openai` only, default unset (provider
+  default).
+- `sample_rate_hz`, `num_channels` — required with `format: "pcm"` and
+  `provider: "sherpa"`.
+- `api_key_env` — name of an env var the `stt` process reads at call
+  time; `openai` only. Never a literal key. Must be on the operator's
+  `STT_PLUGIN_ALLOWED_KEY_ENVS` allowlist.
+- `base_url` — API base override; `openai` only. Default
+  `https://api.openai.com/v1`.
+- `model` — `openai`: one of `whisper-1`, `gpt-4o-transcribe`,
+  `gpt-4o-mini-transcribe` (default `whisper-1`); `sherpa`: ignored (the
+  operator-configured model is used).
+- `timeout_ms` — default `30000`, capped at `60000`. Cloud requests are
+  further capped at `network`'s 30 s HTTP limit.
+
+### Response
+
+`ActionResponse.data_json` on success:
+
+```json
+{
+  "text": "Hello from Veyron.",
+  "language": "en",
+  "duration_seconds": 2.4,
+  "model": "whisper-1"
+}
+```
+
+- `text` — the transcript, trimmed.
+- `language` — your `language` hint for `openai`; the model's language for
+  `sherpa` (your hint wins if you sent one). `""` when unknown.
+- `duration_seconds` — derived from the wav header for `wav` uploads,
+  `0` otherwise (mp3/ogg).
+- `model` — `openai`: the resolved model id; `sherpa`: `sherpa:<family>`
+  (e.g. `sherpa:transducer`).
+
+### Per-provider notes
+
+- **`sherpa`** — audio never leaves the machine. `wav` or raw `pcm` only.
+  The first request loads the ONNX model (can take a few seconds); later
+  requests use the cached engine. A caller-supplied `language` is applied
+  per-request when the model family supports it (whisper).
+- **`openai`** — the upload goes through `network`'s `http_request`
+  action as a multipart body. Needs `network` registered + running, an
+  allowlisted `api_key_env`, and the key present in the `stt` process env.
+
+### Examples
+
+Minimal local (wav upload):
+
+```json
+{ "provider": "sherpa", "audio_base64": "UklGRg..." }
+```
+
+Local raw pcm (16 kHz mono):
+
+```json
+{
+  "provider": "sherpa",
+  "audio_base64": "AP8A/wD/AP8A/wA=",
+  "format": "pcm",
+  "sample_rate_hz": 16000,
+  "num_channels": 1
+}
+```
+
+Cloud, German audio, mp3:
+
+```json
+{
+  "provider": "openai",
+  "audio_base64": "SUQzBAAAAA...",
+  "format": "mp3",
+  "language": "de",
+  "api_key_env": "OPENAI_API_KEY"
+}
+```
+
+## `stt_models`
+
+```json
+{ "provider": "openai" }
+```
+
+Returns the models the provider exposes as a list of `{ "id", "name" }`
+objects. Use an `id` as the `model` value in `stt_transcribe` (openai).
+
+- `sherpa` — `[{ "id": "sherpa:transducer", ... }]` (the one
+  operator-configured model).
+- `openai` — the known ids: `whisper-1`, `gpt-4o-transcribe`,
+  `gpt-4o-mini-transcribe`.
+
+## Errors
+
+Any failure returns `ACTION_ERROR` with a human-readable `error` string.
+Callers can hit these:
+
+| Error | When |
+|---|---|
+| `invalid JSON: ...` | `params_json` isn't valid JSON |
+| `missing required field: provider` | no `provider` |
+| `unsupported provider: X` | `provider` isn't `sherpa`/`openai` |
+| `missing required field: audio_base64` | no audio |
+| `audio_base64 must not be empty` | empty string |
+| `audio_base64 is not valid base64: ...` | malformed base64 |
+| `audio_base64 exceeds max size of 26214400 bytes` | over the cap |
+| `audio_base64 decoded to an empty audio payload` | base64 of nothing |
+| `sherpa supports formats wav\|pcm, got: X` | bad format for `sherpa` |
+| `openai supports formats wav\|mp3\|ogg, got: X` | bad format for `openai` |
+| `openai supports formats wav\|mp3\|ogg (raw pcm is not accepted)` | `pcm` + `openai` |
+| `language 'X' is not a valid ISO-639-1 code (letters only)` | bad language |
+| `prompt exceeds max length of 1000 chars` | prompt too long |
+| `missing required field: api_key_env` | `openai` without a key env name |
+| `api_key_env must not be empty` | empty key env name |
+| `unknown openai model 'X' (known: ...)` | bad `model` for `openai` |
+| `api_key_env 'X' is not in the operator's STT_PLUGIN_ALLOWED_KEY_ENVS allowlist` | un-allowlisted key env name |
+| `environment variable X is not set` | allowlisted but unset key env |
+| `pcm input requires num_channels` / `pcm input requires sample_rate_hz` | `sherpa` + `pcm` without metadata |
+| `sherpa accepts wav\|pcm input only` | `sherpa` with mp3/ogg audio |
+| `not a RIFF/WAVE file`, `wav missing fmt chunk`, `unsupported wav encoding: X`, `unsupported wav bit depth: X`, `wav missing data chunk` | broken wav upload |
+| `STT_PLUGIN_LOCAL_MODEL_DIR is not set ...` / `is not a directory` | operator config problem |
+| `STT_PLUGIN_LOCAL_MODEL_TYPE is not set ...` / `is unsupported ...` | operator config problem |
+| `missing required model file: <path>` | model dir incomplete |
+| `sherpa-onnx failed to load model from ...` | model files invalid for the family |
+| `network plugin call failed: ...` | `network` unreachable/erroring |
+| `network plugin error: ...` | `network` returned non-OK |
+| `malformed network response: ...` | `network` reply isn't the expected shape |
+| `provider returned HTTP X: <body>` | non-2xx from the provider (e.g. 401 bad key, 400 bad audio) |
+| `malformed openai transcription response: ...` | unexpected body on 2xx |
+| `openai returned an empty transcript` | provider returned blank text |
+
+Never logged, never echoed: the resolved API key. Errors only ever
+reference the env var *name* (`api_key_env`).
+
+## Common patterns
+
+- **Record once, transcribe many**: plugins capture audio (16 kHz mono
+  wav is the sweet spot — small uploads, `duration_seconds` works), then
+  call `stt_transcribe` per clip.
+- **Language hints**: pass `language` when you know it — Whisper-family
+  decoders use it to constrain decoding, and the response echoes it back
+  for your own bookkeeping.
+- **Context prompts**: for tricky domains (numbers, names, jargon), pass
+  `prompt` with the `openai` provider; Whisper uses it as decoding context.
+- **Local = private**: use `sherpa` for anything sensitive — the audio
+  and model run entirely in-process.

@@ -1,0 +1,12 @@
+{
+  "plugin_id": "stt",
+  "version": "0.1.0",
+  "permissions": [],
+  "kernel_compatibility_range": {
+    "min": "0.1.0",
+    "max": "*"
+  },
+  "binary": "stt",
+  "events": [],
+  "actions": ["stt_transcribe", "stt_models"]
+}
