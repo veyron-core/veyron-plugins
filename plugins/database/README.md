@@ -82,6 +82,5 @@ kernel matches on `action_id`.
 v1. Depends on kernel support for `ActionRequest.caller_plugin_id` and
 `PERMISSION_STORAGE` (see
 `docs/superpowers/plans/2026-07-17-database-plugin-kernel-support.md` in the
-`veyron` repo). Currently built against a local path override of
-`veyron-wire`/`veyron-sdk` rather than a published crates.io release — see
-this plugin's `Cargo.toml`.
+`veyron` repo). The manifest declares the published requirements
+(`veyron-sdk = "0.1"`, `veyron-wire = "0.2"`), which resolve from crates.io.
