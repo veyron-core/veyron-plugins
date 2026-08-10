@@ -33,9 +33,11 @@ pub const MAX_HEADER_COUNT: usize = 100;
 pub const MAX_HEADERS_TOTAL_BYTES: usize = 32 * 1024;
 
 /// Redirects are disabled unless `follow_redirects` is set, and even then
-/// capped at this many hops (not caller-configurable — see main.rs, which
-/// builds one fixed redirect-enabled client rather than one per request).
-/// Every hop still resolves through `SsrfSafeResolver`.
+/// capped at this many hops. `max_redirects` is caller-configurable per
+/// request (defaults to this, clamped to it) — see main.rs, which keeps one
+/// redirect-enabled client per distinct cap so per-request limits don't
+/// forfeit connection pooling. Every hop still resolves through
+/// `SsrfSafeResolver`.
 pub const MAX_REDIRECTS: usize = 10;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -48,6 +50,10 @@ pub struct HttpRequestParams {
     pub max_retries: u32,
     pub retry_backoff_ms: u64,
     pub follow_redirects: bool,
+    /// Max redirect hops to follow when `follow_redirects` is true. Defaults
+    /// to `MAX_REDIRECTS`, clamped to it. Ignored when
+    /// `follow_redirects` is false.
+    pub max_redirects: usize,
 }
 
 const ALLOWED_METHODS: &[&str] = &[
@@ -69,6 +75,7 @@ pub fn parse_request(params_json: &[u8]) -> Result<HttpRequestParams, String> {
         max_retries: Option<u32>,
         retry_backoff_ms: Option<u64>,
         follow_redirects: Option<bool>,
+        max_redirects: Option<usize>,
     }
 
     let raw: Raw =
@@ -115,6 +122,7 @@ pub fn parse_request(params_json: &[u8]) -> Result<HttpRequestParams, String> {
         max_retries,
         retry_backoff_ms,
         follow_redirects: raw.follow_redirects.unwrap_or(false),
+        max_redirects: raw.max_redirects.unwrap_or(MAX_REDIRECTS).min(MAX_REDIRECTS),
     })
 }
 
@@ -232,5 +240,30 @@ mod tests {
         )
         .unwrap();
         assert_eq!(params.retry_backoff_ms, MAX_RETRY_BACKOFF_MS);
+    }
+
+    #[test]
+    fn defaults_max_redirects_to_cap() {
+        let params =
+            parse_request(br#"{"method": "GET", "url": "https://example.com"}"#).unwrap();
+        assert_eq!(params.max_redirects, MAX_REDIRECTS);
+    }
+
+    #[test]
+    fn preserves_max_redirects_below_cap() {
+        let params = parse_request(
+            br#"{"method": "GET", "url": "https://example.com", "max_redirects": 2}"#,
+        )
+        .unwrap();
+        assert_eq!(params.max_redirects, 2);
+    }
+
+    #[test]
+    fn clamps_max_redirects_above_cap() {
+        let params = parse_request(
+            br#"{"method": "GET", "url": "https://example.com", "max_redirects": 99}"#,
+        )
+        .unwrap();
+        assert_eq!(params.max_redirects, MAX_REDIRECTS);
     }
 }

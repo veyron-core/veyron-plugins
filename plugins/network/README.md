@@ -85,10 +85,22 @@ would need changes in `veyron-core` itself, not this plugin.
 ## Redirects
 
 Disabled by default (`ACTION_OK` with the redirect's own 3xx status
-returned as-is). Set `follow_redirects: true` to follow up to
-`MAX_REDIRECTS` (10, fixed — not caller-configurable) hops; every hop still
-resolves through `SsrfSafeResolver`, so a redirect to a blocked host still
-fails the whole request.
+returned as-is). Set `follow_redirects: true` to follow redirects, capped
+by `max_redirects` (default `10`, clamped to `10` — the hard ceiling).
+Every hop still resolves through `SsrfSafeResolver`, so a redirect to a
+blocked host still fails the whole request.
+
+## Per-caller concurrency cap
+
+`http_request`s run concurrently — one slow request doesn't block the
+caller's next one, and a caller can have several in flight at once (the
+kernel matches responses by `action_id`, replies may come back out of
+order). `NETWORK_PLUGIN_MAX_INFLIGHT_PER_CALLER` (default `8`, `0` =
+unlimited) caps how many requests one calling plugin may have in flight at
+once, so a single noisy plugin can't monopolize `network`'s outbound
+connections while others starve. A request over the cap is rejected
+immediately with an `ACTION_ERROR` naming the caller and the limit; slots
+free up as in-flight requests complete.
 
 ## Allowlist mode (operator-configurable)
 

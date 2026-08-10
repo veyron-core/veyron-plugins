@@ -305,6 +305,7 @@ mod tests {
             max_retries: 0,
             retry_backoff_ms: 1,
             follow_redirects: false,
+            max_redirects: crate::request::MAX_REDIRECTS,
         }
     }
 

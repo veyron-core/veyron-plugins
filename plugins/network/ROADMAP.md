@@ -32,24 +32,22 @@ policy, egress control, and observability live in one place.
   SSRF-gated policy is likewise not retried.
 - **Opt-in proxy** — `NETWORK_PLUGIN_PROXY_URL`; ambient `HTTP_PROXY` env
   is now ignored (was a silent SSRF bypass before this was closed).
+- **Concurrent request loop + per-caller concurrency cap** — `main.rs`
+  hand-rolls the same concurrent serve-loop pattern `database` uses (one
+  task owns the `VeyronClient`, spawned handlers reply via an mpsc
+  channel), so multiple `http_request`s are genuinely in flight at once.
+  `NETWORK_PLUGIN_MAX_INFLIGHT_PER_CALLER` (default 8, `0` = unlimited)
+  rejects a caller's request once it has that many in flight, so one noisy
+  plugin can't monopolize `network`'s outbound connections. Landed in
+  0.2.0.
+- **Configurable `max_redirects` per request** — new `max_redirects` param
+  (default 10, clamped to `MAX_REDIRECTS`). One redirect-enabled client per
+  distinct cap value (`0..=10`) instead of a single fixed client, so
+  per-request limits don't forfeit connection pooling.
 
 ## Near-term (buildable now, no kernel changes)
 
-- **Per-caller concurrency cap** — track in-flight requests per calling
-  plugin id and reject over some configurable limit, so one noisy plugin
-  can't monopolize `network`'s outbound connections. Protocol-wise this is
-  unblocked: wire 0.2.0 `ActionRequest.caller_plugin_id` exists and the
-  kernel populates it (veyron `src/ipc/protocol.rs`). What's still
-  blocking is architecture: `network` runs the SDK's sequential
-  `Plugin::run` loop, so at most one request is ever in flight and there's
-  nothing to cap. First switch `main.rs` to the concurrent serve-loop
-  pattern `database` uses (one task owns the `VeyronClient`, spawned
-  handlers reply via an mpsc channel), then land the cap in the same
-  release (0.2.0).
-- **Configurable `max_redirects` per request** — today it's a fixed 10 via
-  a single pre-built client; a genuinely per-request cap would need either
-  a client built per request (loses connection pooling) or a custom
-  `redirect::Policy` closure driven by request-scoped state.
+(none — the two near-term items above shipped in 0.2.0.)
 
 ## Requires kernel/protocol changes (see `KERNEL_PROTOCOL_TODO.md`, gitignored)
 
