@@ -1,0 +1,56 @@
+# Example kernel config.yaml entry for the `tts` plugin.
+# Copy this block into the top-level `plugins:` list of the kernel's
+# config.yaml (see repo root config.yaml for the full schema).
+#
+# `tts` declares zero kernel permissions (same reasoning as `ai`):
+#   - cloud providers (openai, elevenlabs) route their HTTP through the
+#     `network` plugin's `http_request` action, so `network` must be
+#     registered and running for them to work;
+#   - the local provider (`sherpa`) opens no sockets at all — it loads an
+#     ONNX model from disk and synthesizes in-process.
+#
+# `tts` reads no config file — the only configuration is env vars listed
+# here, read at call time (see src/handler.rs).
+
+plugins:
+  - id: tts
+    binary: /opt/plugins/tts        # path to the built `tts` binary
+    restart: on-failure
+    max_restarts: 5
+    sandbox: true                   # tts opens no sockets itself; network does
+    env:
+      # --- Required for cloud providers only -------------------------------
+      # Every env var name a caller is allowed to reference via
+      # api_key_env, comma-separated, exact match. Default-deny — omitting
+      # this rejects every cloud synthesize request. Without it a caller
+      # could name *any* env var this process has (not just a provider
+      # key) and get its value sent straight into an outbound request
+      # header to a caller-controlled base_url.
+      - TTS_PLUGIN_ALLOWED_KEY_ENVS=OPENAI_API_KEY,ELEVENLABS_API_KEY
+      # OpenAI TTS key. Callers reference it via "api_key_env": "OPENAI_API_KEY".
+      - OPENAI_API_KEY=sk-...
+      # ElevenLabs key. "api_key_env": "ELEVENLABS_API_KEY".
+      - ELEVENLABS_API_KEY=...
+      # --- Required for the local provider (sherpa) ------------------------
+      # Directory holding the ONNX model files, and which model family it
+      # is. The local provider loads the model lazily on the first
+      # synthesize request and caches it for the process lifetime.
+      #   kokoro: model.onnx, voices.bin, tokens.txt, espeak-ng-data/,
+      #           dict/, lexicon-us-en.txt (see README.md for the layout
+      #           and where to download the files)
+      #   piper:  model.onnx, tokens.txt, espeak-ng-data/   (piper voices,
+      #           e.g. en_US-lessac-medium from rhasspy/piper-voices)
+      - TTS_PLUGIN_LOCAL_MODEL_DIR=/opt/tts-models/kokoro
+      - TTS_PLUGIN_LOCAL_MODEL_TYPE=kokoro
+      # Optional: onnxruntime thread count for local synthesis.
+      # Default 2. Raise for long texts on multicore hosts.
+      # - TTS_PLUGIN_LOCAL_NUM_THREADS=2
+      # Optional: comma-separated espeak-ng lexicon list for kokoro.
+      # Default: auto-detect every lexicon-*.txt in the model dir.
+      # - TTS_PLUGIN_KOKORO_LEXICON=lexicon-us-en.txt
+    grace_seconds: 10
+    max_procs: 64
+    # Local inference loads the model into RAM. Kokoro f32 is ~310 MB,
+    # int8 ~88 MB; the piper medium model ~100 MB. Keep this above the
+    # model size plus workspace. Cloud-only installs can stay at 512.
+    max_vmem_mb: 1024

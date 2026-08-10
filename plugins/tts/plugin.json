@@ -1,0 +1,12 @@
+{
+  "plugin_id": "tts",
+  "version": "0.1.0",
+  "permissions": [],
+  "kernel_compatibility_range": {
+    "min": "0.1.0",
+    "max": "*"
+  },
+  "binary": "tts",
+  "events": [],
+  "actions": ["tts_synthesize", "tts_voices"]
+}
