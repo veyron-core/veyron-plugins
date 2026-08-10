@@ -22,7 +22,10 @@ use std::sync::{Arc, Mutex};
 
 use network_plugin::{handler, request};
 use tokio::sync::mpsc;
-use veyron_sdk::proto::{envelope, ActionResponse, ActionStatus, Envelope, PluginManifest, Pong};
+use veyron_sdk::proto::{
+    envelope, ActionResponse, ActionStatus, Envelope, EventPublish, EventPublishStatus,
+    PluginManifest, Pong,
+};
 use veyron_sdk::{VeyronClient, VeyronError};
 
 /// Operator-only opt-in proxy for all outbound requests. Deliberately not a
@@ -214,8 +217,24 @@ impl NetworkPlugin {
         }
     }
 
-    async fn handle_http_request(&self, params_json: &[u8]) -> Result<Vec<u8>, String> {
-        let params = request::parse_request(params_json)?;
+    async fn handle_http_request(&self, params_json: &[u8]) -> HttpOutcome {
+        let started = std::time::Instant::now();
+        let params = match request::parse_request(params_json) {
+            Ok(params) => params,
+            Err(e) => {
+                return HttpOutcome {
+                    response: Err(e),
+                    status: 0,
+                    host: String::new(),
+                    latency_ms: started.elapsed().as_millis() as u64,
+                    retry_count: 0,
+                }
+            }
+        };
+        let host = url::Url::parse(&params.url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .unwrap_or_default();
 
         // `SsrfSafeResolver` never runs for a literal-IP host (see its gate
         // in `redirect_policy`'s doc comment) — this is the only check for
@@ -223,32 +242,111 @@ impl NetworkPlugin {
         // `network`'s retry/backoff budget on a request that was never
         // going anywhere.
         if let Ok(url) = url::Url::parse(&params.url) {
-            let host = url.host_str().unwrap_or_default();
-            network_plugin::ssrf::check_literal_ip_host(host, &self.extra_blocklist, &self.allowlist)?;
+            let host_str = url.host_str().unwrap_or_default();
+            if let Err(e) = network_plugin::ssrf::check_literal_ip_host(
+                host_str,
+                &self.extra_blocklist,
+                &self.allowlist,
+            ) {
+                return HttpOutcome {
+                    response: Err(e),
+                    status: 0,
+                    host,
+                    latency_ms: started.elapsed().as_millis() as u64,
+                    retry_count: 0,
+                };
+            }
             // Hostname hosts: same fail-fast intent as the literal-IP gate.
             // The resolver is still authoritative at connect time (a name
             // can re-resolve between here and there — rebinding TOCTOU),
             // but a host that's blocked today fails here deterministically,
             // before the retry loop can burn attempts on it.
-            if host.parse::<std::net::IpAddr>().is_err() && !host.is_empty() {
-                handler::check_host_reachable(host, &self.extra_blocklist, &self.allowlist).await?;
+            if host_str.parse::<std::net::IpAddr>().is_err() && !host_str.is_empty() {
+                if let Err(e) = handler::check_host_reachable(
+                    host_str,
+                    &self.extra_blocklist,
+                    &self.allowlist,
+                )
+                .await
+                {
+                    return HttpOutcome {
+                        response: Err(e),
+                        status: 0,
+                        host,
+                        latency_ms: started.elapsed().as_millis() as u64,
+                        retry_count: 0,
+                    };
+                }
             }
         }
 
-        let resp = handler::fetch(self.client_for(&params), &params).await?;
-        serde_json::to_vec(&serde_json::json!({
-            "status": resp.status,
-            "headers": resp.headers,
-            "body": resp.body,
-            "body_encoding": resp.body_encoding,
-        }))
-        .map_err(|e| format!("failed to encode response: {e}"))
+        let outcome = handler::fetch_with_stats(self.client_for(&params), &params).await;
+        let (response, status) = match outcome.response {
+            Ok(resp) => (
+                serde_json::to_vec(&serde_json::json!({
+                    "status": resp.status,
+                    "headers": resp.headers,
+                    "body": resp.body,
+                    "body_encoding": resp.body_encoding,
+                }))
+                .map_err(|e| format!("failed to encode response: {e}")),
+                resp.status,
+            ),
+            Err(e) => (Err(e), 0),
+        };
+        HttpOutcome {
+            response,
+            status,
+            host,
+            latency_ms: started.elapsed().as_millis() as u64,
+            retry_count: outcome.stats.attempts.saturating_sub(1),
+        }
+    }
+}
+
+/// Terminal outcome of one `http_request`: the response bytes (or error) the
+/// caller gets in its `ActionResponse`, plus the data the best-effort
+/// `network.request_completed` event carries. `spawn_handler` builds both
+/// envelopes from this single value.
+struct HttpOutcome {
+    response: Result<Vec<u8>, String>,
+    /// HTTP status of the final attempt; `0` when no HTTP response was
+    /// obtained (SSRF-policy rejection, transport failure).
+    status: u16,
+    host: String,
+    latency_ms: u64,
+    /// `attempts - 1` — how many times the fetch was retried.
+    retry_count: u32,
+}
+
+/// Best-effort `network.request_completed` event (kernel-namespaced as
+/// `plugin.network.request_completed`). Fire-and-forget: it must never block
+/// or alter the caller's response, so `spawn_handler` sends the
+/// `ActionResponse` envelope first.
+fn event_envelope(outcome: &HttpOutcome) -> Envelope {
+    let payload_json = serde_json::to_vec(&serde_json::json!({
+        "status": outcome.status,
+        "host": outcome.host,
+        "latency_ms": outcome.latency_ms,
+        "retry_count": outcome.retry_count,
+        "error": outcome.response.as_ref().err().cloned().unwrap_or_default(),
+    }))
+    .unwrap_or_else(|e| format!("{{\"error\":\"failed to encode event: {e}\"}}").into_bytes());
+    Envelope {
+        payload: Some(envelope::Payload::EventPublish(EventPublish {
+            event_type: "request_completed".into(),
+            payload_json,
+        })),
+        ..Default::default()
     }
 }
 
 fn manifest() -> PluginManifest {
     PluginManifest {
-        permissions: vec!["PERMISSION_NETWORK".into()],
+        permissions: vec![
+            "PERMISSION_NETWORK".into(),
+            "PERMISSION_EVENT_PUBLISH".into(),
+        ],
         actions: vec!["http_request".into()],
         ..Default::default()
     }
@@ -347,15 +445,24 @@ fn spawn_handler(
     tokio::spawn(async move {
         let inner_plugin = plugin.clone();
         let join = tokio::spawn(async move { inner_plugin.handle_http_request(&params_json).await });
-        let result = match join.await {
-            Ok(result) => result,
-            Err(join_err) => Err(format!("handler panicked: {join_err}")),
+        let outcome = match join.await {
+            Ok(outcome) => outcome,
+            Err(join_err) => HttpOutcome {
+                response: Err(format!("handler panicked: {join_err}")),
+                status: 0,
+                host: String::new(),
+                latency_ms: 0,
+                retry_count: 0,
+            },
         };
         inflight.release(&caller_plugin_id);
-        let envelope = response_envelope(action_id, result);
+        let event = event_envelope(&outcome);
+        let envelope = response_envelope(action_id, outcome.response);
         // Receiver side only goes away when the main loop exits, at which
         // point dropping the reply is the correct behavior anyway.
         let _ = tx.send(envelope).await;
+        // Best-effort, sent only after the response so the reply never waits on observability.
+        let _ = tx.send(event).await;
     });
 }
 
@@ -407,6 +514,11 @@ async fn run_loop(
                         let _ = client.send("kernel", pong).await;
                     }
                     Some(envelope::Payload::PluginShutdown(_)) => break,
+                    Some(envelope::Payload::EventPublishAck(ack)) => {
+                        if ack.status != EventPublishStatus::EventPublishOk as i32 {
+                            println!("[network] event publish failed: {:?}", ack.status);
+                        }
+                    }
                     Some(envelope::Payload::ActionRequest(req)) if req.action == "http_request" => {
                         match inflight.try_acquire(&req.caller_plugin_id) {
                             Ok(()) => {
@@ -461,7 +573,7 @@ async fn main() -> Result<(), VeyronError> {
 
     let mut client = VeyronClient::connect_from_env().await?;
     let token = std::env::var("VEYRON_JWT_TOKEN").unwrap_or_default();
-    let ack = client.register_full("network", "0.2.0", manifest(), &token).await?;
+    let ack = client.register_full("network", "0.3.0", manifest(), &token).await?;
     if !ack.accepted {
         return Err(VeyronError::PermissionDenied(format!(
             "registration rejected: {}",
@@ -608,7 +720,8 @@ mod tests {
         }
 
         let mut seen = std::collections::HashSet::new();
-        for _ in 0..N {
+        let mut events = 0;
+        while seen.len() < N || events < N {
             let env = tokio::time::timeout(Duration::from_secs(5), kernel.recv())
                 .await
                 .expect("timed out waiting for response — loop likely deadlocked")
@@ -619,6 +732,13 @@ mod tests {
                     let v: serde_json::Value = serde_json::from_slice(&resp.data_json).unwrap();
                     assert_eq!(v["body"], "hello");
                     assert!(seen.insert(resp.action_id), "duplicate response");
+                }
+                Some(envelope::Payload::EventPublish(ev)) => {
+                    assert_eq!(ev.event_type, "request_completed");
+                    let v: serde_json::Value = serde_json::from_slice(&ev.payload_json).unwrap();
+                    assert_eq!(v["status"], 200);
+                    assert_eq!(v["retry_count"], 0, "no retries requested");
+                    events += 1;
                 }
                 other => panic!("unexpected payload: {other:?}"),
             }
@@ -693,7 +813,8 @@ mod tests {
 
         let mut ok = 0;
         let mut rejected = 0;
-        for _ in 0..6 {
+        let mut events = 0;
+        while ok + rejected < 6 || events < 3 {
             let env = tokio::time::timeout(Duration::from_secs(5), kernel.recv())
                 .await
                 .expect("timed out waiting for response")
@@ -711,11 +832,15 @@ mod tests {
                         rejected += 1;
                     }
                 }
-                other => panic!("unexpected payload: {other:?}"),
+                Some(envelope::Payload::EventPublish(ev)) => {
+                    assert_eq!(ev.event_type, "request_completed");
+                    events += 1;
+                }                other => panic!("unexpected payload: {other:?}"),
             }
         }
         assert_eq!(ok, 3, "caller_x's 2 + caller_y's 1 should all succeed");
         assert_eq!(rejected, 3, "caller_x's remaining 3 should be rejected");
+        assert_eq!(events, 3, "one event per accepted request, none for over-cap rejections");
 
         let shutdown = Envelope {
             payload: Some(envelope::Payload::PluginShutdown(PluginShutdown {
@@ -757,7 +882,7 @@ mod tests {
             "max_redirects": 1,
         })
         .to_string();
-        let out = plugin.handle_http_request(capped.as_bytes()).await.unwrap();
+        let out = plugin.handle_http_request(capped.as_bytes()).await.response.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(v["status"], 302, "one hop allowed: stops at B's 3xx");
 
@@ -768,9 +893,162 @@ mod tests {
             "max_redirects": 2,
         })
         .to_string();
-        let out = plugin.handle_http_request(full.as_bytes()).await.unwrap();
+        let out = plugin.handle_http_request(full.as_bytes()).await.response.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(v["status"], 200, "two hops allowed: reaches C");
         assert_eq!(v["body"], "ok");
+    }
+
+    /// A successful request emits exactly one `request_completed` event with
+    /// `retry_count = attempts - 1` (0 here: one attempt, no retries), the
+    /// HTTP status, the target host, and a latency measurement.
+    #[tokio::test]
+    async fn request_completed_event_reports_retry_count_on_success() {
+        let plugin = test_plugin();
+        let inflight = Arc::new(Inflight::new(0));
+        let url = mock_server_responding("HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\nhello").await;
+
+        let (plugin_side, kernel_side) = UnixStream::pair().unwrap();
+        let client = VeyronClient::from_stream(plugin_side, None);
+        let mut kernel = VeyronClient::from_stream(kernel_side, None);
+        let loop_task = tokio::spawn(run_loop(client, plugin, inflight));
+
+        let params = serde_json::json!({"method": "GET", "url": url}).to_string();
+        kernel
+            .send(
+                "network",
+                http_request("evt-ok", "caller_x", params.into_bytes()),
+            )
+            .await
+            .unwrap();
+
+        let mut response_seen = false;
+        let mut event_seen = false;
+        for _ in 0..2 {
+            let env = tokio::time::timeout(Duration::from_secs(5), kernel.recv())
+                .await
+                .expect("timed out waiting for response")
+                .unwrap();
+            match env.payload {
+                Some(envelope::Payload::ActionResponse(resp)) => {
+                    assert_eq!(resp.status, ActionStatus::ActionOk as i32);
+                    response_seen = true;
+                }
+                Some(envelope::Payload::EventPublish(ev)) => {
+                    assert_eq!(ev.event_type, "request_completed");
+                    let v: serde_json::Value = serde_json::from_slice(&ev.payload_json).unwrap();
+                    assert_eq!(v["status"], 200);
+                    assert_eq!(v["host"], "127.0.0.1");
+                    assert_eq!(v["retry_count"], 0, "one attempt, no retries");
+                    assert_eq!(v["error"], "");
+                    assert!(v["latency_ms"].as_u64().is_some());
+                    event_seen = true;
+                }
+                other => panic!("unexpected payload: {other:?}"),
+            }
+        }
+        assert!(response_seen && event_seen, "expected a response and an event");
+
+        let shutdown = Envelope {
+            payload: Some(envelope::Payload::PluginShutdown(PluginShutdown {
+                reason: "test done".into(),
+                grace_seconds: 0,
+            })),
+            ..Default::default()
+        };
+        kernel.send("network", shutdown).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), loop_task)
+            .await
+            .expect("run_loop did not exit after PluginShutdown")
+            .unwrap()
+            .unwrap();
+    }
+
+    /// A request that ultimately fails still emits the event, with
+    /// `retry_count = attempts - 1`: a server that drops the connection is a
+    /// transport error (always retried), so `max_retries: 2` runs 3 attempts
+    /// and the event reports `retry_count: 2`, `status: 0`, and an error
+    /// string — the same `status`/`error` a subscriber needs to distinguish
+    /// "never got an HTTP response" from a status-code failure.
+    #[tokio::test]
+    async fn request_completed_event_reports_retry_count_on_failure() {
+        let plugin = test_plugin();
+        let inflight = Arc::new(Inflight::new(0));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(conn) => conn,
+                    Err(_) => break,
+                };
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buf).await;
+                    drop(socket);
+                });
+            }
+        });
+        let url = format!("http://{addr}/");
+
+        let (plugin_side, kernel_side) = UnixStream::pair().unwrap();
+        let client = VeyronClient::from_stream(plugin_side, None);
+        let mut kernel = VeyronClient::from_stream(kernel_side, None);
+        let loop_task = tokio::spawn(run_loop(client, plugin, inflight));
+
+        let params = serde_json::json!({
+            "method": "GET",
+            "url": url,
+            "max_retries": 2,
+            "retry_backoff_ms": 1,
+        })
+        .to_string();
+        kernel
+            .send(
+                "network",
+                http_request("evt-fail", "caller_x", params.into_bytes()),
+            )
+            .await
+            .unwrap();
+
+        let mut response_seen = false;
+        let mut event_seen = false;
+        for _ in 0..2 {
+            let env = tokio::time::timeout(Duration::from_secs(5), kernel.recv())
+                .await
+                .expect("timed out waiting for response")
+                .unwrap();
+            match env.payload {
+                Some(envelope::Payload::ActionResponse(resp)) => {
+                    assert_eq!(resp.status, ActionStatus::ActionError as i32);
+                    response_seen = true;
+                }
+                Some(envelope::Payload::EventPublish(ev)) => {
+                    assert_eq!(ev.event_type, "request_completed");
+                    let v: serde_json::Value = serde_json::from_slice(&ev.payload_json).unwrap();
+                    assert_eq!(v["status"], 0, "no HTTP response was ever received");
+                    assert_eq!(v["host"], "127.0.0.1");
+                    assert_eq!(v["retry_count"], 2, "max_retries 2: 3 attempts, 2 retries");
+                    assert!(!v["error"].as_str().unwrap().is_empty());
+                    event_seen = true;
+                }
+                other => panic!("unexpected payload: {other:?}"),
+            }
+        }
+        assert!(response_seen && event_seen, "expected a response and an event");
+
+        let shutdown = Envelope {
+            payload: Some(envelope::Payload::PluginShutdown(PluginShutdown {
+                reason: "test done".into(),
+                grace_seconds: 0,
+            })),
+            ..Default::default()
+        };
+        kernel.send("network", shutdown).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(5), loop_task)
+            .await
+            .expect("run_loop did not exit after PluginShutdown")
+            .unwrap()
+            .unwrap();
     }
 }

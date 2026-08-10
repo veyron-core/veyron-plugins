@@ -1,7 +1,7 @@
 {
   "plugin_id": "network",
-  "version": "0.2.0",
-  "permissions": ["network"],
+  "version": "0.3.0",
+  "permissions": ["network", "event_publish"],
   "kernel_compatibility_range": {
     "min": "0.1.0",
     "max": "*"

@@ -168,20 +168,50 @@ fn is_retryable_status(status: u16) -> bool {
     matches!(status, 429 | 500 | 502 | 503 | 504)
 }
 
+/// How many HTTP attempts one fetch attempt series ran. Surfaced so the
+/// plugin can build `network.request_completed` event payloads
+/// (`retry_count = attempts - 1`) without re-counting what `fetch` already
+/// tracked internally.
+#[derive(Debug, Clone, Copy)]
+pub struct FetchStats {
+    /// Number of attempts made (1 = no retries).
+    pub attempts: u32,
+}
+
+/// Terminal outcome of a fetch attempt series: the response (or error) plus
+/// the [`FetchStats`] measured along the way.
+#[derive(Debug)]
+pub struct FetchOutcome {
+    pub response: Result<HttpResponseJson, String>,
+    pub stats: FetchStats,
+}
+
 /// Send the HTTP request and map the response, retrying transient failures
 /// up to `params.max_retries` times with exponential backoff
 /// (`params.retry_backoff_ms`, doubling, capped at
 /// [`crate::request::MAX_RETRY_BACKOFF_MS`]). SSRF gating happens inside the
 /// `client`'s DNS resolver, not here — see module docs.
 ///
-/// Only transient failures are retried. Deterministic ones — a response
-/// over [`MAX_BODY_BYTES`], a redirect hop rejected by the client's
-/// redirect policy — fail on the first attempt regardless of
-/// `max_retries`, since retrying reproduces them exactly.
+/// Convenience wrapper over [`fetch_with_stats`] that discards the attempt
+/// stats — used by callers that only need the response.
 pub async fn fetch(
     client: &reqwest::Client,
     params: &HttpRequestParams,
 ) -> Result<HttpResponseJson, String> {
+    fetch_with_stats(client, params).await.response
+}
+
+/// [`fetch`] plus the [`FetchStats`] the attempt series accumulated, for
+/// callers that want to observe how many attempts actually ran.
+///
+/// Only transient failures are retried. Deterministic ones — a response
+/// over [`MAX_BODY_BYTES`], a redirect hop rejected by the client's
+/// redirect policy — fail on the first attempt regardless of
+/// `max_retries`, since retrying reproduces them exactly.
+pub async fn fetch_with_stats(
+    client: &reqwest::Client,
+    params: &HttpRequestParams,
+) -> FetchOutcome {
     let host = reqwest::Url::parse(&params.url)
         .ok()
         .and_then(|u| u.host_str().map(str::to_string))
@@ -212,7 +242,12 @@ pub async fn fetch(
         println!("{log_line}");
 
         if !retry {
-            return result.map_err(|e| e.message);
+            return FetchOutcome {
+                response: result.map_err(|e| e.message),
+                stats: FetchStats {
+                    attempts: attempt + 1,
+                },
+            };
         }
         tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
         backoff_ms = (backoff_ms * 2).min(crate::request::MAX_RETRY_BACKOFF_MS);
