@@ -25,6 +25,11 @@ policy, egress control, and observability live in one place.
 - **Structured JSON logging** — one JSON line per attempt to stdout.
 - **Retry with backoff** — `max_retries`/`retry_backoff_ms`, retries only
   on 429/5xx/transport errors.
+- **Deterministic failures are not retried** — SSRF-policy rejections
+  (literal-IP and hostname hosts, pre-checked before the first attempt)
+  and response bodies over the 10 MiB cap fail on the first attempt;
+  retrying reproduces them exactly. A redirect hop rejected by the
+  SSRF-gated policy is likewise not retried.
 - **Opt-in proxy** — `NETWORK_PLUGIN_PROXY_URL`; ambient `HTTP_PROXY` env
   is now ignored (was a silent SSRF bypass before this was closed).
 
@@ -32,10 +37,15 @@ policy, egress control, and observability live in one place.
 
 - **Per-caller concurrency cap** — track in-flight requests per calling
   plugin id and reject over some configurable limit, so one noisy plugin
-  can't monopolize `network`'s outbound connections. Currently blocked:
-  `ActionRequest` has no caller-id field to key on (see
-  `KERNEL_PROTOCOL_TODO.md`) — would need that added first, or the kernel
-  to pass caller identity some other way.
+  can't monopolize `network`'s outbound connections. Protocol-wise this is
+  unblocked: wire 0.2.0 `ActionRequest.caller_plugin_id` exists and the
+  kernel populates it (veyron `src/ipc/protocol.rs`). What's still
+  blocking is architecture: `network` runs the SDK's sequential
+  `Plugin::run` loop, so at most one request is ever in flight and there's
+  nothing to cap. First switch `main.rs` to the concurrent serve-loop
+  pattern `database` uses (one task owns the `VeyronClient`, spawned
+  handlers reply via an mpsc channel), then land the cap in the same
+  release (0.2.0).
 - **Configurable `max_redirects` per request** — today it's a fixed 10 via
   a single pre-built client; a genuinely per-request cap would need either
   a client built per request (loses connection pooling) or a custom

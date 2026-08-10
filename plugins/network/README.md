@@ -44,6 +44,13 @@ attempt). A response is retried only on `429` or `5xx`; any other status
 failures (connection refused, timeout) are always retried up to
 `max_retries`. Retries are opt-in — callers get none unless they ask.
 
+Deterministic failures are never retried, no matter what `max_retries`
+says: an SSRF-policy rejection (blocked host/IP — both literal-IP and
+hostname hosts are rejected before any attempt is made) and a response
+body over the 10 MiB cap fail on the first attempt, since retrying
+reproduces them exactly. A redirect hop rejected by the SSRF-gated policy
+is likewise not retried.
+
 Retries aren't restricted to idempotent methods; a caller requesting
 retries on e.g. `POST` is responsible for that being safe for its endpoint.
 
