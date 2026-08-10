@@ -70,10 +70,35 @@ a proxy you trust to do its own filtering.
 ## Logging
 
 Every attempt (including retries) logs one JSON line to stdout: `plugin`,
-`method`, `host`, `attempt`, `status`, `error`, `duration_ms`. There's no
-kernel-event-bus metrics path yet — the wire protocol has no plugin → event
-publish path (only kernel-internal code calls `EventBus::publish`), so that
-would need changes in `veyron-core` itself, not this plugin.
+`method`, `host`, `attempt`, `status`, `error`, `duration_ms`.
+
+## Events
+
+Every `http_request` — success or failure — also publishes a
+`plugin.network.request_completed` event to the kernel event bus (the
+kernel prepends the `plugin.<sender_id>.` namespace; the bus matches
+subscriptions exactly, so subscribe to `plugin.network.request_completed`).
+The payload is one JSON object:
+
+```json
+{
+  "status": 200,
+  "host": "example.com",
+  "latency_ms": 42,
+  "retry_count": 0,
+  "error": ""
+}
+```
+
+`status` is the final attempt's HTTP status, or `0` when no HTTP response
+was obtained (SSRF-policy rejection, transport failure). `retry_count` is
+`attempts - 1` — how many times the request was actually retried, so a
+subscriber can watch retry storms. `error` is the failure message, empty on
+success.
+
+Publishing is best-effort and fire-and-forget: the `ActionResponse` is
+always sent first, and a dropped event (loop shutting down, channel full)
+never delays or fails the caller's reply. Requires `PERMISSION_EVENT_PUBLISH`.
 
 ## Response body encoding
 

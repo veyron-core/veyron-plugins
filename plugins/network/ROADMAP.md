@@ -44,17 +44,22 @@ policy, egress control, and observability live in one place.
   (default 10, clamped to `MAX_REDIRECTS`). One redirect-enabled client per
   distinct cap value (`0..=10`) instead of a single fixed client, so
   per-request limits don't forfeit connection pooling.
+- **`network.request_completed` events** — every `http_request` now also
+  publishes a `plugin.network.request_completed` event (kernel prepends the
+  `plugin.<sender_id>.` namespace — subscribers subscribe to
+  `plugin.network.request_completed` exactly, the event bus does no
+  wildcard matching). Payload: `status` (0 when no HTTP response was
+  obtained), `host`, `latency_ms`, `retry_count` (`attempts - 1`), `error`.
+  Publish is best-effort via the `EventPublish` wire path
+  (`PERMISSION_EVENT_PUBLISH`) and always trails the `ActionResponse`, so
+  observability never delays or fails the caller's reply. Landed in 0.3.0.
 
 ## Near-term (buildable now, no kernel changes)
 
-(none — the two near-term items above shipped in 0.2.0.)
+(none — the near-term items above shipped in 0.2.0.)
 
 ## Requires kernel/protocol changes (see `KERNEL_PROTOCOL_TODO.md`, gitignored)
 
-- **`network.request_completed` events** — publish status/host/latency/retry
-  count to the event bus instead of (or in addition to) stdout, so other
-  plugins/observability tooling can subscribe. Blocked on a plugin → event
-  publish wire path that doesn't exist yet.
 - **`http_request_stream` action** — avoid full-body buffering for large
   downloads/uploads. Blocked on a chunked-action wire primitive.
 - **WebSocket support** — persistent bidirectional connections. Biggest
