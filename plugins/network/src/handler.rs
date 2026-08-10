@@ -35,6 +35,36 @@ use crate::ssrf::{self, Allowlist, Blocklist};
 /// never silently truncated.
 pub const MAX_BODY_BYTES: usize = 10 * 1024 * 1024;
 
+/// Failure of one HTTP attempt, carrying whether retrying could plausibly
+/// help. Deterministic failures (SSRF-policy rejection, response body over
+/// the cap) reproduce identically on every attempt, so retrying them just
+/// burns the caller's retry budget and `network`'s egress time.
+#[derive(Debug)]
+struct FetchError {
+    message: String,
+    retryable: bool,
+}
+
+impl FetchError {
+    /// Failure that may be transient (connection refused, timeout, 5xx) —
+    /// worth retrying.
+    fn transient(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retryable: true,
+        }
+    }
+
+    /// Failure that is deterministic — retrying will produce the same
+    /// result, so don't.
+    fn deterministic(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retryable: false,
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct HttpResponseJson {
     pub status: u16,
@@ -60,6 +90,55 @@ pub struct SsrfSafeResolver {
     pub allowlist: Allowlist,
 }
 
+/// Filter a resolution result down to the addresses SSRF policy permits:
+/// dropped if in the operator's extra blocklist, and otherwise allowed only
+/// when the allowlist names the host/IP or, absent an allowlist, the
+/// address isn't in the built-in blocked ranges.
+fn filter_allowed_addrs(
+    host: &str,
+    addrs: impl Iterator<Item = std::net::SocketAddr>,
+    extra_blocklist: &Blocklist,
+    allowlist: &Allowlist,
+) -> Vec<std::net::SocketAddr> {
+    addrs
+        .filter(|a| {
+            if extra_blocklist.blocks_ip(&a.ip()) {
+                return false;
+            }
+            if !allowlist.is_empty() {
+                allowlist.allows_host(host) || allowlist.allows_ip(&a.ip())
+            } else {
+                !ssrf::is_blocked_ip(a.ip())
+            }
+        })
+        .collect()
+}
+
+/// Deterministic pre-check that SSRF policy permits reaching `host` at all.
+/// Not the authoritative gate for a real request — a name can re-resolve
+/// between this check and the connect (rebinding TOCTOU), so
+/// [`SsrfSafeResolver`] stays the authority and re-filters every actual
+/// connect. This exists so callers can fail fast (and outside the retry
+/// loop) on a request that was never going anywhere, mirroring the
+/// literal-IP gate `ssrf::check_literal_ip_host` provides for IP hosts.
+pub async fn check_host_reachable(
+    host: &str,
+    extra_blocklist: &Blocklist,
+    allowlist: &Allowlist,
+) -> Result<(), String> {
+    if extra_blocklist.blocks_host(host) {
+        return Err(format!("host {host} is blocked by operator blocklist"));
+    }
+    let resolved = tokio::net::lookup_host((host, 0))
+        .await
+        .map_err(|e| format!("failed to resolve host {host}: {e}"))?;
+    let allowed = filter_allowed_addrs(host, resolved, extra_blocklist, allowlist);
+    if allowed.is_empty() {
+        return Err(format!("all resolved IPs for {host} are blocked by SSRF policy"));
+    }
+    Ok(())
+}
+
 impl Resolve for SsrfSafeResolver {
     fn resolve(&self, name: Name) -> Resolving {
         let extra_blocklist = self.extra_blocklist.clone();
@@ -73,18 +152,7 @@ impl Resolve for SsrfSafeResolver {
                 .await
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
 
-            let allowed: Vec<_> = resolved
-                .filter(|a| {
-                    if extra_blocklist.blocks_ip(&a.ip()) {
-                        return false;
-                    }
-                    if !allowlist.is_empty() {
-                        allowlist.allows_host(&host) || allowlist.allows_ip(&a.ip())
-                    } else {
-                        !ssrf::is_blocked_ip(a.ip())
-                    }
-                })
-                .collect();
+            let allowed = filter_allowed_addrs(&host, resolved, &extra_blocklist, &allowlist);
             if allowed.is_empty() {
                 return Err(format!("all resolved IPs for {host} are blocked by SSRF policy").into());
             }
@@ -105,6 +173,11 @@ fn is_retryable_status(status: u16) -> bool {
 /// (`params.retry_backoff_ms`, doubling, capped at
 /// [`crate::request::MAX_RETRY_BACKOFF_MS`]). SSRF gating happens inside the
 /// `client`'s DNS resolver, not here — see module docs.
+///
+/// Only transient failures are retried. Deterministic ones — a response
+/// over [`MAX_BODY_BYTES`], a redirect hop rejected by the client's
+/// redirect policy — fail on the first attempt regardless of
+/// `max_retries`, since retrying reproduces them exactly.
 pub async fn fetch(
     client: &reqwest::Client,
     params: &HttpRequestParams,
@@ -122,7 +195,7 @@ pub async fn fetch(
         let retry = attempt < params.max_retries
             && match &result {
                 Ok(resp) => is_retryable_status(resp.status),
-                Err(_) => true,
+                Err(e) => e.retryable,
             };
 
         // One-line JSON per attempt so operators can pipe stdout straight
@@ -133,13 +206,13 @@ pub async fn fetch(
             "host": host,
             "attempt": attempt + 1,
             "status": result.as_ref().ok().map(|r| r.status),
-            "error": result.as_ref().err(),
+            "error": result.as_ref().err().map(|e| e.message.as_str()),
             "duration_ms": started.elapsed().as_millis(),
         });
         println!("{log_line}");
 
         if !retry {
-            return result;
+            return result.map_err(|e| e.message);
         }
         tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
         backoff_ms = (backoff_ms * 2).min(crate::request::MAX_RETRY_BACKOFF_MS);
@@ -150,9 +223,9 @@ pub async fn fetch(
 async fn fetch_once(
     client: &reqwest::Client,
     params: &HttpRequestParams,
-) -> Result<HttpResponseJson, String> {
+) -> Result<HttpResponseJson, FetchError> {
     let method = reqwest::Method::from_bytes(params.method.as_bytes())
-        .map_err(|e| format!("invalid method: {e}"))?;
+        .map_err(|e| FetchError::deterministic(format!("invalid method: {e}")))?;
 
     let mut req = client
         .request(method, &params.url)
@@ -165,7 +238,15 @@ async fn fetch_once(
         req = req.body(body.clone());
     }
 
-    let mut resp = req.send().await.map_err(|e| format!("request failed: {e}"))?;
+    let mut resp = req.send().await.map_err(|e| {
+        if e.is_redirect() {
+            // The redirect policy (SSRF-gated hops) rejected a hop — the
+            // same chain replays identically on every attempt.
+            FetchError::deterministic(format!("request failed: {e}"))
+        } else {
+            FetchError::transient(format!("request failed: {e}"))
+        }
+    })?;
     let status = resp.status().as_u16();
     let headers = resp
         .headers()
@@ -174,10 +255,16 @@ async fn fetch_once(
         .collect();
 
     let mut body_bytes = Vec::new();
-    while let Some(chunk) = resp.chunk().await.map_err(|e| format!("body read error: {e}"))? {
+    while let Some(chunk) = resp
+        .chunk()
+        .await
+        .map_err(|e| FetchError::transient(format!("body read error: {e}")))?
+    {
         body_bytes.extend_from_slice(&chunk);
         if body_bytes.len() > MAX_BODY_BYTES {
-            return Err("response body exceeds 10 MiB cap".into());
+            return Err(FetchError::deterministic(
+                "response body exceeds 10 MiB cap".to_string(),
+            ));
         }
     }
 
@@ -203,6 +290,8 @@ async fn fetch_once(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
@@ -379,5 +468,101 @@ mod tests {
         p.timeout_ms = 100;
         let err = fetch(&client, &p).await.unwrap_err();
         assert!(err.contains("request failed"), "error was: {err}");
+    }
+
+    /// Spawn a server that serves `response` to every connection it
+    /// accepts, forever, counting how many connections were made. Returns
+    /// the URL and the shared connection counter.
+    async fn counting_server(response: &'static str) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let connections = Arc::new(AtomicUsize::new(0));
+        let connections_clone = connections.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                connections_clone.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0u8; 1024];
+                let _ = socket.read(&mut buf).await;
+                let _ = socket.write_all(response.as_bytes()).await;
+            }
+        });
+        (format!("http://{addr}/"), connections)
+    }
+
+    #[tokio::test]
+    async fn fetch_does_not_retry_body_over_cap() {
+        let big_body = "x".repeat(MAX_BODY_BYTES + 1);
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{}",
+            big_body.len(),
+            big_body
+        );
+        let (url, connections) = counting_server(Box::leak(response.into_boxed_str())).await;
+        let client = reqwest::Client::new();
+        let mut p = params(url);
+        p.max_retries = 3;
+        let err = fetch(&client, &p).await.unwrap_err();
+        assert!(err.contains("10 MiB"), "error was: {err}");
+        assert_eq!(
+            connections.load(Ordering::SeqCst),
+            1,
+            "body-over-cap is deterministic and must not be retried"
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_does_not_retry_redirect_policy_rejection() {
+        let (url, connections) = counting_server(
+            "HTTP/1.1 302 Found\r\nlocation: http://example.invalid/\r\ncontent-length: 0\r\n\r\n",
+        )
+        .await;
+        // Rejects every redirect — same shape as the SSRF-gated policy in
+        // main.rs when a hop lands on a blocked host.
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                attempt.error("redirect rejected by policy")
+            }))
+            .build()
+            .unwrap();
+        let mut p = params(url);
+        p.max_retries = 3;
+        let err = fetch(&client, &p).await.unwrap_err();
+        assert!(
+            err.contains("error following redirect"),
+            "error was: {err}"
+        );
+        assert_eq!(
+            connections.load(Ordering::SeqCst),
+            1,
+            "a rejected redirect hop is deterministic and must not be retried"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_host_reachable_blocks_loopback() {
+        let err = check_host_reachable("localhost", &Blocklist::default(), &Allowlist::default())
+            .await
+            .unwrap_err();
+        assert!(err.contains("blocked"), "error was: {err}");
+    }
+
+    #[tokio::test]
+    async fn check_host_reachable_allowlist_permits_loopback() {
+        let allowlist = Allowlist::parse("localhost");
+        assert!(
+            check_host_reachable("localhost", &Blocklist::default(), &allowlist)
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn check_host_reachable_honors_extra_blocklist() {
+        let blocklist = Blocklist::parse("localhost");
+        let err = check_host_reachable("localhost", &blocklist, &Allowlist::default())
+            .await
+            .unwrap_err();
+        assert!(err.contains("operator blocklist"), "error was: {err}");
     }
 }

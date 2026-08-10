@@ -145,6 +145,14 @@ impl NetworkPlugin {
         if let Ok(url) = url::Url::parse(&params.url) {
             let host = url.host_str().unwrap_or_default();
             network_plugin::ssrf::check_literal_ip_host(host, &self.extra_blocklist, &self.allowlist)?;
+            // Hostname hosts: same fail-fast intent as the literal-IP gate.
+            // The resolver is still authoritative at connect time (a name
+            // can re-resolve between here and there — rebinding TOCTOU),
+            // but a host that's blocked today fails here deterministically,
+            // before the retry loop can burn attempts on it.
+            if host.parse::<std::net::IpAddr>().is_err() && !host.is_empty() {
+                handler::check_host_reachable(host, &self.extra_blocklist, &self.allowlist).await?;
+            }
         }
 
         let client = if params.follow_redirects {
