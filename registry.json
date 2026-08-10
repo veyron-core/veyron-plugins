@@ -18,16 +18,16 @@
     "slug": "network",
     "name": "Network",
     "description": "Outbound HTTP for plugins/kernel via one http_request action, gated by PERMISSION_NETWORK. HTTP-only v1.",
-    "version": "0.1.2",
+    "version": "0.1.5",
     "permissions": [
       "network"
     ],
-    "archive_url": "https://raw.githubusercontent.com/veyron-core/veyron-plugins/main/dist/network-0.1.2.zip",
+    "archive_url": "https://raw.githubusercontent.com/veyron-core/veyron-plugins/main/dist/network-0.1.5.zip",
     "source_url": "https://github.com/veyron-core/veyron-plugins/tree/main/plugins/network",
-    "sha256": "ee4469073ce285ca512c2663d44990d9186f6770eaf89aff82b0d94eba4d0174",
+    "sha256": "308c7990038a36144ff1729413106c9f6cccf9648a6f689370185c6488efdc4d",
     "min_kernel_version": "0.1.0",
     "max_kernel_version": "*",
-    "signature": "52e95a14b01657679636424414c89fbfb29e31c8321128c796d81f0f21aa4d1e2d857dd391886a4515450d42b73a30a5ee78e47017f901bd074195d15a4b0305"
+    "signature": "93de564e73ed0d7481a5375ec0a7d397a6b21b40f1760a17141a1e2fa6a6a38ee5697689a0f322f2a7cd23bc8638910d5a4a1cf6f2629fa5d412e3e2109d2c07"
   },
   {
     "id": "003",
@@ -40,10 +40,10 @@
     ],
     "archive_url": "https://raw.githubusercontent.com/veyron-core/veyron-plugins/main/dist/database-0.1.0.zip",
     "source_url": "https://github.com/veyron-core/veyron-plugins/tree/main/plugins/database",
-    "sha256": "1d53d7b83fe162e97382da3973b55ad5e407dad02f383c3e729de59c9771cbad",
+    "sha256": "55550f4d7c51dfbade5db4161920a9802347b78bf3b875163f20abfc9aede756",
     "min_kernel_version": "0.1.0",
     "max_kernel_version": "*",
-    "signature": "72ce3753583593ce26ae72ded8620c3f90b9cb940999cfb831bd2981c21206df62e19e9b1786038bfe858eda42dde3d2240c8f82e92add66e6d8de8795197708"
+    "signature": "9e69b3b9b8a6d702676e490be7e6d7450f4eadbeca23f130537c6d101d21b5ebbae34952e7644ffc11af29dce62f84ce55423eff5587ebabd5d4bd07b01e0a0c"
   },
   {
     "id": "004",
@@ -54,9 +54,9 @@
     "permissions": [],
     "archive_url": "https://raw.githubusercontent.com/veyron-core/veyron-plugins/main/dist/ai-0.1.0.zip",
     "source_url": "https://github.com/veyron-core/veyron-plugins/tree/main/plugins/ai",
-    "sha256": "3fde5a6bf1944612570f28dfa8887f6f03a874910863e22a194db6cfdb596f9e",
+    "sha256": "e485e50068bae0714ec167d05d31b50e03b4b0d0c25c09118c9a4ffa4406f10e",
     "min_kernel_version": "0.1.0",
     "max_kernel_version": "*",
-    "signature": "c433994649599603616c4c5ccbaf8f62f12b3025dcdb2424add3aa1b500ffc9742b84195fa5812f2856f6eb861aa8f77dfbb55d37bbf3f4c59df012ffc1ebd0f"
+    "signature": "03f96ffa52da2df14bba70845bb848cb3806bbbce4599b3452096a82e5604623f404742d4139f2a803b3a50b16f5d4f854e7fbdb24be11bc6a962901f9bf650a"
   }
 ]
