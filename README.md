@@ -11,6 +11,8 @@ kernel.
 | `network` | `plugins/network/` | `PERMISSION_NETWORK` | Outbound HTTP for plugins/kernel via one `http_request` action. HTTP-only v1 (no WebSocket). See `plugins/network/README.md`. |
 | `ai` | `plugins/ai/` | none | Provider-agnostic LLM chat completion (`chat_completion`) for anthropic + openai-compatible providers. Routes through `network`, declares no permissions itself. See `plugins/ai/README.md`. |
 | `database` | `plugins/database/` | `PERMISSION_STORAGE` | Per-caller-namespaced KV + raw SQL storage over SQLite, five `db_*` actions. See `plugins/database/README.md`. |
+| `tts` | `plugins/tts/` | none | Text-to-speech via `tts_synthesize` + `tts_voices`: in-process local ONNX engine (sherpa: Kokoro/Piper, fully offline) + cloud providers (openai, elevenlabs) routed through `network`. Declares no permissions itself. See `plugins/tts/README.md`. |
+| `stt` | `plugins/stt/` | none | Speech-to-text via `stt_transcribe` + `stt_models`: in-process local ONNX engine (sherpa: zipformer/whisper, fully offline) + cloud provider (openai audio API) routed through `network`. Declares no permissions itself. See `plugins/stt/README.md`. |
 
 ## Registry
 
