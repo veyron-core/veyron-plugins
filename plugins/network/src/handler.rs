@@ -269,8 +269,24 @@ async fn fetch_once(
     for (k, v) in &params.headers {
         req = req.header(k, v);
     }
-    if let Some(body) = &params.body {
-        req = req.body(body.clone());
+    let body_bytes: Option<Vec<u8>> = match (&params.body, &params.body_base64) {
+        (Some(_), Some(_)) => {
+            return Err(FetchError::deterministic(
+                "set body or body_base64, not both".to_string(),
+            ))
+        }
+        (Some(text), None) => Some(text.clone().into_bytes()),
+        (None, Some(b64)) => {
+            use base64::Engine;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(b64)
+                .map_err(|e| FetchError::deterministic(format!("invalid body_base64: {e}")))?;
+            Some(bytes)
+        }
+        (None, None) => None,
+    };
+    if let Some(bytes) = body_bytes {
+        req = req.body(bytes);
     }
 
     let mut resp = req.send().await.map_err(|e| {
@@ -336,6 +352,7 @@ mod tests {
             url,
             headers: HashMap::new(),
             body: None,
+            body_base64: None,
             timeout_ms: 5000,
             max_retries: 0,
             retry_backoff_ms: 1,
@@ -354,6 +371,12 @@ mod tests {
             let _ = socket.write_all(response.as_bytes()).await;
         });
         format!("http://{addr}/")
+    }
+
+    fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle)
     }
 
     #[tokio::test]
@@ -398,6 +421,73 @@ mod tests {
         let client = reqwest::Client::new();
         let resp = fetch(&client, &params(url)).await.unwrap();
         assert_eq!(resp.body_encoding, "utf8");
+    }
+
+    #[tokio::test]
+    async fn fetch_sends_body_base64_byte_exact() {
+        let raw_body: &[u8] = &[0x00, 0x01, 0x02, 0xff, 0xfe, 0x7f];
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            // Read the full request: headers (up to \r\n\r\n) then exactly
+            // content-length body bytes, and echo the body back raw.
+            let mut buf = Vec::new();
+            let mut tmp = [0u8; 1024];
+            let header_end;
+            loop {
+                let n = socket.read(&mut tmp).await.unwrap();
+                buf.extend_from_slice(&tmp[..n]);
+                if let Some(pos) = find_subslice(&buf, b"\r\n\r\n") {
+                    header_end = pos + 4;
+                    break;
+                }
+            }
+            let headers = String::from_utf8_lossy(&buf[..header_end]).to_string();
+            let content_length = headers
+                .lines()
+                .find_map(|l| {
+                    l.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(|v| v.trim().parse::<usize>().unwrap())
+                })
+                .unwrap();
+            while buf.len() < header_end + content_length {
+                let n = socket.read(&mut tmp).await.unwrap();
+                buf.extend_from_slice(&tmp[..n]);
+            }
+            let body = &buf[header_end..header_end + content_length];
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n",
+                body.len()
+            );
+            let mut out = response.into_bytes();
+            out.extend_from_slice(body);
+            let _ = socket.write_all(&out).await;
+        });
+        let client = reqwest::Client::new();
+        use base64::Engine;
+        let mut p = params(format!("http://{addr}/"));
+        p.method = "POST".into();
+        p.body_base64 = Some(base64::engine::general_purpose::STANDARD.encode(raw_body));
+        let resp = fetch(&client, &p).await.unwrap();
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body_encoding, "base64");
+        let echoed = base64::engine::general_purpose::STANDARD
+            .decode(&resp.body)
+            .unwrap();
+        assert_eq!(echoed, raw_body);
+    }
+
+    #[tokio::test]
+    async fn fetch_rejects_body_and_body_base64_together() {
+        let url = mock_server("HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n").await;
+        let client = reqwest::Client::new();
+        let mut p = params(url);
+        p.body = Some("text".to_string());
+        p.body_base64 = Some("AAEC/w==".to_string());
+        let err = fetch(&client, &p).await.unwrap_err();
+        assert!(err.contains("not both"), "error was: {err}");
     }
 
     #[tokio::test]

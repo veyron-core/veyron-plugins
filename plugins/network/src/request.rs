@@ -32,6 +32,12 @@ pub const MAX_HEADER_COUNT: usize = 100;
 /// many small headers as well as a few huge ones.
 pub const MAX_HEADERS_TOTAL_BYTES: usize = 32 * 1024;
 
+/// Hard ceiling on the decoded size of a `body_base64` request body.
+/// Matches OpenAI's audio upload cap — the largest legitimate binary body
+/// a plugin needs to push through `network` today (a Whisper-style
+/// multipart upload). Rejected outright.
+pub const MAX_REQUEST_BODY_BYTES: usize = 25 * 1024 * 1024;
+
 /// Redirects are disabled unless `follow_redirects` is set, and even then
 /// capped at this many hops. `max_redirects` is caller-configurable per
 /// request (defaults to this, clamped to it) — see main.rs, which keeps one
@@ -46,6 +52,10 @@ pub struct HttpRequestParams {
     pub url: String,
     pub headers: HashMap<String, String>,
     pub body: Option<String>,
+    /// Base64-encoded binary request body, mutually exclusive with `body`
+    /// (which is UTF-8 only and would mangle binary bytes). Set the
+    /// `Content-Type` header yourself when sending one.
+    pub body_base64: Option<String>,
     pub timeout_ms: u64,
     pub max_retries: u32,
     pub retry_backoff_ms: u64,
@@ -71,6 +81,7 @@ pub fn parse_request(params_json: &[u8]) -> Result<HttpRequestParams, String> {
         #[serde(default)]
         headers: HashMap<String, String>,
         body: Option<String>,
+        body_base64: Option<String>,
         timeout_ms: Option<u64>,
         max_retries: Option<u32>,
         retry_backoff_ms: Option<u64>,
@@ -106,6 +117,20 @@ pub fn parse_request(params_json: &[u8]) -> Result<HttpRequestParams, String> {
         ));
     }
 
+    if raw.body.is_some() && raw.body_base64.is_some() {
+        return Err("set body or body_base64, not both".to_string());
+    }
+    if let Some(b64) = &raw.body_base64 {
+        // Base64 of exactly MAX_REQUEST_BODY_BYTES bytes is at most
+        // 4 * ceil(n / 3) chars; reject anything larger up front so a
+        // huge base64 blob can't be decoded (and buffered) in vain.
+        if b64.len() > (MAX_REQUEST_BODY_BYTES / 3) * 4 + 4 {
+            return Err(format!(
+                "body_base64 decodes to more than the {MAX_REQUEST_BODY_BYTES}-byte cap"
+            ));
+        }
+    }
+
     let timeout_ms = raw.timeout_ms.unwrap_or(MAX_TIMEOUT_MS).min(MAX_TIMEOUT_MS);
     let max_retries = raw.max_retries.unwrap_or(0).min(MAX_RETRIES);
     let retry_backoff_ms = raw
@@ -118,6 +143,7 @@ pub fn parse_request(params_json: &[u8]) -> Result<HttpRequestParams, String> {
         url: url_str,
         headers: raw.headers,
         body: raw.body,
+        body_base64: raw.body_base64,
         timeout_ms,
         max_retries,
         retry_backoff_ms,
@@ -176,6 +202,44 @@ mod tests {
         )
         .unwrap();
         assert_eq!(params.timeout_ms, 500);
+    }
+
+    #[test]
+    fn accepts_body_base64_alone() {
+        let params = parse_request(br#"{
+            "method": "POST",
+            "url": "https://example.com/upload",
+            "headers": {"Content-Type": "application/octet-stream"},
+            "body_base64": "AAEC/w=="
+        }"#)
+        .unwrap();
+        assert!(params.body.is_none());
+        assert_eq!(params.body_base64.as_deref(), Some("AAEC/w=="));
+    }
+
+    #[test]
+    fn rejects_both_body_and_body_base64() {
+        let err = parse_request(br#"{
+            "method": "POST",
+            "url": "https://example.com/upload",
+            "body": "text",
+            "body_base64": "AAEC/w=="
+        }"#)
+        .unwrap_err();
+        assert!(err.contains("not both"), "error was: {err}");
+    }
+
+    #[test]
+    fn rejects_oversized_body_base64() {
+        let huge_b64 = "A".repeat((MAX_REQUEST_BODY_BYTES / 3) * 4 + 8);
+        let body = serde_json::json!({
+            "method": "POST",
+            "url": "https://example.com/upload",
+            "body_base64": huge_b64,
+        })
+        .to_string();
+        let err = parse_request(body.as_bytes()).unwrap_err();
+        assert!(err.contains("cap"), "error was: {err}");
     }
 
     #[test]
