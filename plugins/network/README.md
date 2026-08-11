@@ -107,6 +107,16 @@ never delays or fails the caller's reply. Requires `PERMISSION_EVENT_PUBLISH`.
 `body_encoding` is `"base64"` instead of `"utf8"`. Always check
 `body_encoding` before treating `body` as text.
 
+## Request body encoding
+
+`body` is sent as UTF-8 text — binary request bodies (uploads, multipart
+form-data) would be mangled. For those, set `body_base64` instead: the
+base64-encoded bytes are decoded before sending. `body` and `body_base64`
+are mutually exclusive (setting both is an error). Decoded size is capped
+at 25 MiB. As with text bodies, set the right `Content-Type` via the
+`headers` field — e.g. `Content-Type: multipart/form-data; boundary=...`
+for a multipart upload built by the caller.
+
 ## Redirects
 
 Disabled by default (`ACTION_OK` with the redirect's own 3xx status
