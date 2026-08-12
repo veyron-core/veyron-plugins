@@ -1,5 +1,5 @@
-use veyron::proto::veyron::{envelope, ActionResponse, ActionStatus, Envelope, PluginManifest};
-use veyron::utils::errors::VeyronError;
+use veyron_sdk::proto::{envelope, ActionResponse, ActionStatus, Envelope, PluginManifest};
+use veyron_sdk::VeyronError;
 use veyron_sdk::{Plugin, VeyronClient};
 
 /// Minimal reference plugin: replies "pong" to a "ping" action, rejects anything else.
