@@ -4,6 +4,5 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-veyron-sdk = { git = "https://github.com/veyron-core/veyron", package = "veyron-sdk" }
-veyron = { git = "https://github.com/veyron-core/veyron", package = "veyron" }
+veyron-sdk = "0.1"
 tokio = { version = "1", features = ["full"] }
