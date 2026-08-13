@@ -1,6 +1,6 @@
 {
   "plugin_id": "network",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "permissions": ["network", "event_publish"],
   "kernel_compatibility_range": {
     "min": "0.1.0",
@@ -8,5 +8,123 @@
   },
   "binary": "network",
   "events": [],
-  "actions": ["http_request"]
+  "files": ["network", "plugin.json"],
+  "actions": [
+    {
+      "name": "http_request",
+      "permission": "network",
+      "input": {
+        "type": "object",
+        "properties": {
+          "url": { "type": "string", "description": "Target URL (http/https). SSRF-guarded: loopback, RFC1918, link-local, multicast, broadcast, and cloud metadata 169.254.169.254 are blocked by default." },
+          "method": {
+            "type": "string",
+            "enum": ["GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"],
+            "default": "GET"
+          },
+          "headers": {
+            "type": "object",
+            "additionalProperties": { "type": "string" },
+            "description": "Request headers, e.g. {\"Content-Type\": \"application/json\"}."
+          },
+          "body": {
+            "type": "string",
+            "description": "UTF-8 request body. Mutually exclusive with body_base64."
+          },
+          "body_base64": {
+            "type": "string",
+            "description": "Base64-encoded binary request body. Mutually exclusive with body. Decoded size capped at 25 MiB."
+          },
+          "timeout_ms": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "Per-request timeout in milliseconds."
+          },
+          "max_retries": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 5,
+            "default": 0,
+            "description": "Retries on 429/5xx and transport failures; deterministic failures (SSRF block, oversize response) are never retried."
+          },
+          "retry_backoff_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 5000,
+            "default": 200,
+            "description": "Initial backoff, doubled each retry."
+          },
+          "follow_redirects": {
+            "type": "boolean",
+            "default": false,
+            "description": "Follow redirects when true; otherwise the 3xx status is returned as-is."
+          },
+          "max_redirects": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 10,
+            "default": 10,
+            "description": "Redirect cap when follow_redirects is true. Every hop still resolves through the SSRF-guarded resolver."
+          }
+        },
+        "required": ["url"],
+        "additionalProperties": true
+      },
+      "output": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "integer", "description": "Final HTTP status, or 0 when no response was obtained (SSRF block, transport failure)." },
+          "headers": {
+            "type": "object",
+            "additionalProperties": { "type": "string" }
+          },
+          "body": {
+            "type": "string",
+            "description": "Response text as-is when valid UTF-8, otherwise base64 (see body_encoding)."
+          },
+          "body_encoding": {
+            "type": "string",
+            "enum": ["utf8", "base64"],
+            "description": "How to interpret body."
+          }
+        },
+        "required": ["status", "headers", "body", "body_encoding"],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "config_schema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+      "NETWORK_PLUGIN_ALLOWED_HOSTS": {
+        "type": "string",
+        "description": "Allowlist mode (default-deny): comma-separated IPs/hostnames reachable at all. Built-in RFC1918/loopback ranges stop being consulted for listed hosts."
+      },
+      "NETWORK_PLUGIN_EXTRA_BLOCKED_HOSTS": {
+        "type": "string",
+        "description": "Extra SSRF blocklist: comma-separated IPs and/or bare hostnames, matched before DNS resolution. Applied on top of the allowlist."
+      },
+      "NETWORK_PLUGIN_PROXY_URL": {
+        "type": "string",
+        "format": "uri",
+        "description": "Optional HTTP proxy. Once set, the SSRF blocklist no longer covers hosts reached through it — only enable pointed at a trusted proxy."
+      },
+      "NETWORK_PLUGIN_CA_BUNDLE_PATH": {
+        "type": "string",
+        "description": "Path to one or more PEM-encoded CA certificates, trusted in addition to the built-in root store."
+      },
+      "NETWORK_PLUGIN_CLIENT_IDENTITY_PATH": {
+        "type": "string",
+        "description": "Path to a single PEM file with client certificate + private key (concatenated) for mutual TLS."
+      },
+      "NETWORK_PLUGIN_MAX_INFLIGHT_PER_CALLER": {
+        "type": "integer",
+        "minimum": 0,
+        "default": 8,
+        "description": "Per-caller in-flight request cap so one noisy plugin can't monopolize outbound connections. 0 = unlimited."
+      }
+    },
+    "additionalProperties": true
+  }
 }

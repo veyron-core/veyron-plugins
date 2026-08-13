@@ -102,6 +102,31 @@ min_kernel=$(jq -r '.kernel_compatibility_range.min' "$manifest")
 max_kernel=$(jq -r '.kernel_compatibility_range.max' "$manifest")
 requires_json=$(jq -c '(.requires // [])' "$manifest")
 
+# ---- Manifest v2 shape validation -------------------------------------------
+# Fail fast, before any build work, on manifests that don't match the v2
+# schema this script and the kernel consume. Legacy (pre-v2) manifests must
+# be converted; each check below reports exactly what is wrong.
+
+# `actions` must be an array of objects, each with a string `name`. Legacy
+# v1 manifests listed plain strings — reject those with a pointer at the v2
+# element shape so the maintainer knows what to convert to.
+if ! jq -e '(.actions // []) | all(type == "object" and (.name | type == "string"))' "$manifest" >/dev/null; then
+    echo "error: actions[0] must be an object {name, permission?, input?, output?} — Manifest v2" >&2
+    exit 1
+fi
+
+# `config_schema` is optional, but must be a JSON object when present.
+if ! jq -e '(.config_schema // {}) | type == "object"' "$manifest" >/dev/null; then
+    echo "error: config_schema must be a JSON object — Manifest v2" >&2
+    exit 1
+fi
+
+# `files` is optional, but must be an array of strings when present.
+if ! jq -e '(.files // []) | type == "array" and all(type == "string")' "$manifest" >/dev/null; then
+    echo "error: files must be an array of strings — Manifest v2" >&2
+    exit 1
+fi
+
 echo "==> building release binary for $plugin_dir_name ($slug $version)"
 cargo build --release --manifest-path "$plugin_dir/Cargo.toml"
 
@@ -119,9 +144,39 @@ src_archive_name="$slug-$version-src.zip"
 archive_path="$version_dir/$archive_name"
 src_archive_path="$version_dir/$src_archive_name"
 
+# ---- Manifest v2 `files` archive contents -----------------------------------
+# When the manifest declares `files` (v2), the binary archive contains EXACTLY
+# those files, resolved relative to the plugin dir: the entry matching
+# `binary` maps to the just-built release binary, `plugin.json` to the
+# manifest. Without `files` (legacy), the archive stays binary + plugin.json.
+if jq -e 'has("files")' "$manifest" >/dev/null; then
+    # The declared set must cover the two files the kernel always expects.
+    if ! jq -e --arg b "$binary" '.files | index($b) != null and index("plugin.json") != null' "$manifest" >/dev/null; then
+        echo "error: files must include the binary and plugin.json" >&2
+        exit 1
+    fi
+    archive_files=()
+    while IFS= read -r entry; do
+        if [[ "$entry" == "$binary" ]]; then
+            file_path="$bin_path"
+        elif [[ "$entry" == "plugin.json" ]]; then
+            file_path="$manifest"
+        else
+            file_path="$plugin_dir/$entry"
+        fi
+        if [[ ! -f "$file_path" ]]; then
+            echo "error: files entry '$entry' not found in $plugin_dir" >&2
+            exit 1
+        fi
+        archive_files+=("$file_path")
+    done < <(jq -r '.files[]' "$manifest")
+else
+    archive_files=("$bin_path" "$manifest")
+fi
+
 echo "==> writing $archive_name"
 rm -f "$archive_path"
-zip -j -q "$archive_path" "$bin_path" "$manifest"
+zip -j -q "$archive_path" "${archive_files[@]}"
 
 echo "==> writing $src_archive_name"
 rm -f "$src_archive_path"
