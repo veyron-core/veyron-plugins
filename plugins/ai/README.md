@@ -17,10 +17,13 @@ provider-agnostic calls, system prompts).
 
 ## Operator note
 
-`ai` declares zero kernel permissions (`plugin.json`: `"permissions": []`)
-and opens no sockets itself, so it's safe to run with `sandbox: true`.
-`network` still needs `sandbox: false` (real egress) — see
-`plugins/network/README.md`.
+`ai` declares one kernel permission — `network` (`plugin.json`:
+`"permissions": ["network"]`) — because it invokes the `network` plugin's
+gated `http_request` action, and the kernel's anti-laundering check (T-19)
+requires callers of a gated action to hold its permission too (Manifest v2:
+per-action `permission` on `http_request`). It opens no sockets itself, so
+it's safe to run with `sandbox: true`. `network` still needs
+`sandbox: false` (real egress) — see `plugins/network/README.md`.
 
 ## Action: `chat_completion`
 

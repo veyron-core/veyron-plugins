@@ -7,19 +7,26 @@ rolling its own client.
 
 ## Decision: reuse `network`, don't reinvent
 
-`ai` plugin does **not** open its own sockets and does **not** declare
-`PERMISSION_NETWORK`. It calls the kernel-routed `http_request` action
-(owned by the `network` plugin) via `VeyronClient::send_action` — the
-same helper `network`'s own callers would use. Confirmed in
-`veyron/src/ipc/protocol.rs` (`ActionRequest` routing): the kernel checks
-the *provider's* permission, not the caller's, so `ai` needs no
-network-facing permission at all — smaller attack surface, and SSRF
-blocklist / redirect handling / retry-backoff / response size caps in
-`network` apply for free.
+`ai` plugin does **not** open its own sockets. It calls the kernel-routed
+`http_request` action (owned by the `network` plugin) via
+`VeyronClient::send_action` — the same helper `network`'s own callers would
+use. Because `http_request` is gated by `PERMISSION_NETWORK`, and the
+kernel's anti-laundering check (T-19) requires the *caller* to hold a gated
+action's permission as well as the provider, `ai` declares
+`"permissions": ["network"]` (Manifest v2: the per-action `permission` on
+`network`'s `http_request` makes this data-driven — any caller without the
+permission is denied). SSRF blocklist / redirect handling / retry-backoff /
+response size caps in `network` apply for free.
 
-Practical effect: `ai`'s `plugin.json` has `"permissions": []`. Its only
+(Historical note: the first draft of this section claimed the kernel checks
+only the *provider's* permission and `ai` could declare none — that predates
+T-19's requester-side check, landed in `veyron` as
+`fix: require requester permission for gated actions, not just provider`.)
+
+Practical effect: `ai`'s `plugin.json` has `"permissions": ["network"]` —
+the one permission it needs to invoke `network`'s gated action. Its other
 declared capability is the `actions` it exposes to *its* callers (see
-below), not anything it requires from the kernel.
+below).
 
 ## Naming
 
