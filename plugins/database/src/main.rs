@@ -219,7 +219,7 @@ async fn main() -> Result<(), VeyronError> {
     let mut client = VeyronClient::connect_from_env().await?;
     let token = std::env::var("VEYRON_JWT_TOKEN").unwrap_or_default();
     let ack = client
-        .register_full("database", "0.1.0", manifest(), &token)
+        .register_full("database", "0.2.0", manifest(), &token)
         .await?;
     if !ack.accepted {
         return Err(VeyronError::PermissionDenied(format!(

@@ -573,7 +573,7 @@ async fn main() -> Result<(), VeyronError> {
 
     let mut client = VeyronClient::connect_from_env().await?;
     let token = std::env::var("VEYRON_JWT_TOKEN").unwrap_or_default();
-    let ack = client.register_full("network", "0.3.0", manifest(), &token).await?;
+    let ack = client.register_full("network", "0.4.0", manifest(), &token).await?;
     if !ack.accepted {
         return Err(VeyronError::PermissionDenied(format!(
             "registration rejected: {}",
