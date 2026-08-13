@@ -1,0 +1,12 @@
+{
+  "plugin_id": "ping-pong",
+  "version": "0.1.0",
+  "permissions": [],
+  "kernel_compatibility_range": {
+    "min": "0.1.0",
+    "max": "*"
+  },
+  "binary": "ping-pong-rs",
+  "events": [],
+  "actions": ["ping"]
+}

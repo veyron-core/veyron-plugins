@@ -1,62 +1,84 @@
-[
-  {
-    "id": "001",
-    "slug": "ping-pong",
-    "name": "Ping Pong",
-    "description": "Minimal example plugin that responds to ping actions.",
-    "version": "0.1.0",
-    "permissions": [],
-    "archive_url": "https://raw.githubusercontent.com/veyron-core/veyron-plugins/main/dist/ping-pong-0.1.0.zip",
-    "source_url": "https://github.com/veyron-core/veyron-plugins/tree/main/plugins/ping-pong-rs",
-    "sha256": "bd74128951b58ca4b40160ac6a71d355fc39fa875ddb4808ca61fd47bfde08d7",
-    "min_kernel_version": "0.1.0",
-    "max_kernel_version": "*",
-    "signature": "c75ca5c225ae9605b7ba3bf0c7d9ba77a3cf2247a5ef493b504eaeb2ee3901e038b38ba8081614f9ea8b7bcdb8184dc59717ba93aca16dbadd1d622940895b07"
+{
+  "meta": {
+    "apiVersion": 2,
+    "lastUpdated": "2026-08-13"
   },
-  {
-    "id": "002",
-    "slug": "network",
-    "name": "Network",
-    "description": "Outbound HTTP for plugins/kernel via one http_request action, gated by PERMISSION_NETWORK. HTTP-only v1.",
-    "version": "0.1.5",
-    "permissions": [
-      "network"
-    ],
-    "archive_url": "https://raw.githubusercontent.com/veyron-core/veyron-plugins/main/dist/network-0.1.5.zip",
-    "source_url": "https://github.com/veyron-core/veyron-plugins/tree/main/plugins/network",
-    "sha256": "308c7990038a36144ff1729413106c9f6cccf9648a6f689370185c6488efdc4d",
-    "min_kernel_version": "0.1.0",
-    "max_kernel_version": "*",
-    "signature": "93de564e73ed0d7481a5375ec0a7d397a6b21b40f1760a17141a1e2fa6a6a38ee5697689a0f322f2a7cd23bc8638910d5a4a1cf6f2629fa5d412e3e2109d2c07"
-  },
-  {
-    "id": "003",
-    "slug": "database",
-    "name": "Database",
-    "description": "Per-caller-namespaced KV + raw SQL storage over SQLite, five db_* actions, gated by PERMISSION_STORAGE.",
-    "version": "0.1.0",
-    "permissions": [
-      "storage"
-    ],
-    "archive_url": "https://raw.githubusercontent.com/veyron-core/veyron-plugins/main/dist/database-0.1.0.zip",
-    "source_url": "https://github.com/veyron-core/veyron-plugins/tree/main/plugins/database",
-    "sha256": "55550f4d7c51dfbade5db4161920a9802347b78bf3b875163f20abfc9aede756",
-    "min_kernel_version": "0.1.0",
-    "max_kernel_version": "*",
-    "signature": "9e69b3b9b8a6d702676e490be7e6d7450f4eadbeca23f130537c6d101d21b5ebbae34952e7644ffc11af29dce62f84ce55423eff5587ebabd5d4bd07b01e0a0c"
-  },
-  {
-    "id": "004",
-    "slug": "ai",
+  "revoked": [],
+  "ai": {
     "name": "AI",
     "description": "Provider-agnostic LLM chat completion (chat_completion) for anthropic + openai-compatible providers, routed through the network plugin; declares no permissions itself.",
-    "version": "0.1.0",
-    "permissions": [],
-    "archive_url": "https://raw.githubusercontent.com/veyron-core/veyron-plugins/main/dist/ai-0.1.0.zip",
+    "category": "ai",
+    "tags": [
+      "llm"
+    ],
+    "status": "stable",
     "source_url": "https://github.com/veyron-core/veyron-plugins/tree/main/plugins/ai",
-    "sha256": "e485e50068bae0714ec167d05d31b50e03b4b0d0c25c09118c9a4ffa4406f10e",
-    "min_kernel_version": "0.1.0",
-    "max_kernel_version": "*",
-    "signature": "03f96ffa52da2df14bba70845bb848cb3806bbbce4599b3452096a82e5604623f404742d4139f2a803b3a50b16f5d4f854e7fbdb24be11bc6a962901f9bf650a"
+    "versions": {
+      "0.1.0": {
+        "archive_url": "https://raw.githubusercontent.com/veyron-core/veyron-plugins/main/dist/ai/versions/0.1.0/ai-0.1.0.zip",
+        "sha256": "e485e50068bae0714ec167d05d31b50e03b4b0d0c25c09118c9a4ffa4406f10e",
+        "signature": "03f96ffa52da2df14bba70845bb848cb3806bbbce4599b3452096a82e5604623f404742d4139f2a803b3a50b16f5d4f854e7fbdb24be11bc6a962901f9bf650a",
+        "min_kernel_version": "0.1.0",
+        "max_kernel_version": "*"
+      }
+    }
+  },
+  "database": {
+    "name": "Database",
+    "description": "Per-caller-namespaced KV + raw SQL storage over SQLite, five db_* actions, gated by PERMISSION_STORAGE.",
+    "category": "data",
+    "tags": [
+      "storage",
+      "database"
+    ],
+    "status": "stable",
+    "source_url": "https://github.com/veyron-core/veyron-plugins/tree/main/plugins/database",
+    "versions": {
+      "0.1.0": {
+        "archive_url": "https://raw.githubusercontent.com/veyron-core/veyron-plugins/main/dist/database/versions/0.1.0/database-0.1.0.zip",
+        "sha256": "55550f4d7c51dfbade5db4161920a9802347b78bf3b875163f20abfc9aede756",
+        "signature": "9e69b3b9b8a6d702676e490be7e6d7450f4eadbeca23f130537c6d101d21b5ebbae34952e7644ffc11af29dce62f84ce55423eff5587ebabd5d4bd07b01e0a0c",
+        "min_kernel_version": "0.1.0",
+        "max_kernel_version": "*"
+      }
+    }
+  },
+  "network": {
+    "name": "Network",
+    "description": "Outbound HTTP for plugins/kernel via one http_request action, gated by PERMISSION_NETWORK. HTTP-only v1.",
+    "category": "network",
+    "tags": [
+      "http"
+    ],
+    "status": "stable",
+    "source_url": "https://github.com/veyron-core/veyron-plugins/tree/main/plugins/network",
+    "versions": {
+      "0.1.5": {
+        "archive_url": "https://raw.githubusercontent.com/veyron-core/veyron-plugins/main/dist/network/versions/0.1.5/network-0.1.5.zip",
+        "sha256": "308c7990038a36144ff1729413106c9f6cccf9648a6f689370185c6488efdc4d",
+        "signature": "93de564e73ed0d7481a5375ec0a7d397a6b21b40f1760a17141a1e2fa6a6a38ee5697689a0f322f2a7cd23bc8638910d5a4a1cf6f2629fa5d412e3e2109d2c07",
+        "min_kernel_version": "0.1.0",
+        "max_kernel_version": "*"
+      }
+    }
+  },
+  "ping-pong": {
+    "name": "Ping Pong",
+    "description": "Minimal example plugin that responds to ping actions.",
+    "category": "example",
+    "tags": [
+      "example"
+    ],
+    "status": "stable",
+    "source_url": "https://github.com/veyron-core/veyron-plugins/tree/main/plugins/ping-pong-rs",
+    "versions": {
+      "0.1.0": {
+        "archive_url": "https://raw.githubusercontent.com/veyron-core/veyron-plugins/main/dist/ping-pong/versions/0.1.0/ping-pong-0.1.0.zip",
+        "sha256": "bd74128951b58ca4b40160ac6a71d355fc39fa875ddb4808ca61fd47bfde08d7",
+        "signature": "c75ca5c225ae9605b7ba3bf0c7d9ba77a3cf2247a5ef493b504eaeb2ee3901e038b38ba8081614f9ea8b7bcdb8184dc59717ba93aca16dbadd1d622940895b07",
+        "min_kernel_version": "0.1.0",
+        "max_kernel_version": "*"
+      }
+    }
   }
-]
+}
