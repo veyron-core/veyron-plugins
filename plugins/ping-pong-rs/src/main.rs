@@ -17,6 +17,10 @@ impl Plugin for PingPongPlugin {
         }
     }
 
+    fn version(&self) -> &str {
+        "0.2.0"
+    }
+
     async fn on_init(&mut self, _client: &mut VeyronClient) -> Result<(), VeyronError> {
         Ok(())
     }

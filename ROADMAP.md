@@ -11,10 +11,10 @@ file is the cross-plugin picture only.
 |---|---|---|---|
 | `ping-pong-rs` | `plugins/ping-pong-rs/` | — | example plugin, no real capability |
 | `network` | `plugins/network/` | — | outbound HTTP, `PERMISSION_NETWORK`, SSRF-guarded |
-| `ai` | `plugins/ai/` | `network` | LLM chat completion (anthropic/openai-compatible), zero permissions itself |
+| `ai` | `plugins/ai/` | `network` | LLM chat completion (anthropic/openai-compatible), declares `network` — caller of `network`'s gated `http_request` (T-19) |
 | `database` | `plugins/database/` | — | KV/SQL storage primitive, `PERMISSION_STORAGE`, per-caller SQLite file isolation |
-| `tts` | `plugins/tts/` | `network` (cloud providers) | text-to-speech — local ONNX (sherpa: Kokoro/Piper) in-process + openai/elevenlabs via `network`, zero declared permissions |
-| `stt` | `plugins/stt/` | `network` (cloud provider) | speech-to-text — local ONNX (sherpa: zipformer/whisper) in-process + openai audio via `network`, zero declared permissions |
+| `tts` | `plugins/tts/` | `network` (cloud providers) | text-to-speech — local ONNX (sherpa: Kokoro/Piper) in-process + openai/elevenlabs via `network`, declares `network` (caller of gated `http_request`) |
+| `stt` | `plugins/stt/` | `network` (cloud provider) | speech-to-text — local ONNX (sherpa: zipformer/whisper) in-process + openai audio via `network`, declares `network` (caller of gated `http_request`) |
 
 ## Planned
 
@@ -26,14 +26,14 @@ Dependency order — each row can start once everything in "depends on" ships.
 | `filesystem` | sandboxed file read/write + read-only browse (`ls`/`cat` equivalents: `fs_list`/`fs_read`) — no exec, no shell | — | `PERMISSION_FILES_READ`/`PERMISSION_FILES_WRITE` (existing) |
 | `scheduler` | fire an action/event once after a delay, or repeatedly on a cron expr | `database` (persist schedule state across restarts) | `PERMISSION_SCHEDULER` (existing) |
 | `vector-db` | embedding upsert/similarity search (`vec_upsert`/`vec_query`) | — | own storage backend, standalone |
-| `search` | web search (grounding, not just fetch) | `network` | none beyond `network`'s |
+| `search` | web search (grounding, not just fetch) | `network` | `network` (caller of gated `http_request`) |
 | `notify` | push/desktop/webhook notifications | — | `PERMISSION_NOTIFY` (existing) |
-| `email` | send/receive mail (SMTP/IMAP) | `network`, `secrets` (mailbox creds) | none beyond `network`'s |
-| `image` | image gen + vision (describe/OCR) | `network` (provider API), `secrets` | none beyond `network`'s |
+| `email` | send/receive mail (SMTP/IMAP) | `network`, `secrets` (mailbox creds) | `network` (caller of gated `http_request`) |
+| `image` | image gen + vision (describe/OCR) | `network` (provider API), `secrets` | `network` (caller of gated `http_request`) |
 | `clipboard` | read/write system clipboard | — | `PERMISSION_CLIPBOARD` (new) |
 | `system` | query host info (battery, procs, volume, screen lock) | — | `PERMISSION_SYSTEM` (existing) — broad access, keep strict |
 | `launcher` | launch apps/games by name — Steam (`steam://rungameid/<id>`, reads `libraryfolders.vdf`/`appmanifest_*.acf`) as one provider, generic app launch as another | `filesystem` (read manifests) | `PERMISSION_LAUNCH` (new) |
-| `media` | control media playback (play/pause/skip/volume) — Spotify/YouTube API or MPRIS/media-keys locally | `network` (remote providers), `secrets` | none beyond `network`'s |
+| `media` | control media playback (play/pause/skip/volume) — Spotify/YouTube API or MPRIS/media-keys locally | `network` (remote providers), `secrets` | `network` (caller of gated `http_request`) |
 | `screenshot` | capture screen/window, optional OCR | `image` (OCR) | `PERMISSION_SCREEN` (new) |
 | `window` | list/focus/switch/minimize/maximize open windows | — | `PERMISSION_SYSTEM` (existing, shares scope with `system`) |
 | `home` | home automation over a custom protocol to bare-metal devices (ESP32/Arduino) — not Home Assistant/MQTT, own wire format | `network` (or serial/BLE transport, TBD) | `PERMISSION_HOME` (new) |
@@ -47,6 +47,13 @@ Dependency order — each row can start once everything in "depends on" ships.
 
 `notes`/`calendar` are thin once `database` exists — just schema + validation
 on top of it, same relationship `ai` has to `network`.
+
+Under the Manifest v2 data-driven permission model (§3), any plugin that
+invokes `network`'s gated `http_request` — the shipped `ai`/`tts`/`stt` and
+the planned `search`/`email`/`image`/`media` — declares `PERMISSION_NETWORK`
+itself: T-19 requires the *caller* of a gated action to hold its permission,
+and the per-action `permission` in `network`'s manifest makes that check
+data-driven ("any caller without the permission is denied").
 
 `secrets` should ship early — `network`/`ai` need somewhere to keep API
 keys/tokens that isn't plaintext config. Any plugin holding a credential
@@ -386,11 +393,15 @@ touches keys — only `registry_url`.
 
 1. **Registry v2 + dist/ hierarchy + package.sh** — map form, relative URLs,
    `dependencies`, new dist layout, signing step. Kernel is already tolerant;
-   one PR in this repo.
+   one PR in this repo. **Shipped** (PR #5).
 2. **wire housekeeping** — `PROTOCOL_VERSION` const, sync SDK copies to v1.4,
    fix `gen_proto_python.py`.
 3. **Manifest v2** — per-action permissions + `config_schema`; touches every
-   plugin, kernel load-time checks, and Veyron Web.
+   plugin, kernel load-time checks, and Veyron Web. **Shipped for plugins +
+   kernel** (all 6 manifests are v2, kernel parses object-form `actions`,
+   enforces `files` extraction allowlist, and the anti-laundering check is
+   data-driven from per-action `permission`). Veyron Web consuming
+   `input`/`output`/`config_schema` for form generation is still open.
 
 
 - No plugin-to-plugin direct calls — everything routes through the kernel,

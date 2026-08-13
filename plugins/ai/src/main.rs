@@ -20,11 +20,14 @@ use veyron_sdk::proto::{
 use veyron_sdk::{VeyronClient, VeyronError};
 
 const PLUGIN_ID: &str = "ai";
-const PLUGIN_VERSION: &str = "0.1.0";
+const PLUGIN_VERSION: &str = "0.2.0";
 
 fn manifest() -> PluginManifest {
     PluginManifest {
-        permissions: vec![],
+        // `network`: ai invokes `network`'s gated `http_request` action, and
+        // T-19 requires callers of a gated action to hold its permission too
+        // (matches plugin.json `permissions`; Manifest v2 per-action model).
+        permissions: vec!["PERMISSION_NETWORK".into()],
         actions: vec!["chat_completion".to_string()],
         ..Default::default()
     }

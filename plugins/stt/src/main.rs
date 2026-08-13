@@ -21,11 +21,15 @@ use veyron_sdk::proto::{
 use veyron_sdk::{VeyronClient, VeyronError};
 
 const PLUGIN_ID: &str = "stt";
-const PLUGIN_VERSION: &str = "0.1.0";
+const PLUGIN_VERSION: &str = "0.2.0";
 
 fn manifest() -> PluginManifest {
     PluginManifest {
-        permissions: vec![],
+        // `network`: the cloud provider invokes `network`'s gated
+        // `http_request`, and T-19 requires callers of a gated action to hold
+        // its permission too (matches plugin.json `permissions`; Manifest v2
+        // per-action model).
+        permissions: vec!["PERMISSION_NETWORK".into()],
         actions: vec!["stt_transcribe".to_string(), "stt_models".to_string()],
         ..Default::default()
     }
