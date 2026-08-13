@@ -13,6 +13,8 @@ file is the cross-plugin picture only.
 | `network` | `plugins/network/` | — | outbound HTTP, `PERMISSION_NETWORK`, SSRF-guarded |
 | `ai` | `plugins/ai/` | `network` | LLM chat completion (anthropic/openai-compatible), zero permissions itself |
 | `database` | `plugins/database/` | — | KV/SQL storage primitive, `PERMISSION_STORAGE`, per-caller SQLite file isolation |
+| `tts` | `plugins/tts/` | `network` (cloud providers) | text-to-speech — local ONNX (sherpa: Kokoro/Piper) in-process + openai/elevenlabs via `network`, zero declared permissions |
+| `stt` | `plugins/stt/` | `network` (cloud provider) | speech-to-text — local ONNX (sherpa: zipformer/whisper) in-process + openai audio via `network`, zero declared permissions |
 
 ## Planned
 
@@ -22,8 +24,6 @@ Dependency order — each row can start once everything in "depends on" ships.
 |---|---|---|---|
 | `secrets` | encrypted credential/API-key vault (`secret_get`/`secret_set`) | — | `PERMISSION_SECRETS` (new) |
 | `filesystem` | sandboxed file read/write + read-only browse (`ls`/`cat` equivalents: `fs_list`/`fs_read`) — no exec, no shell | — | `PERMISSION_FILES_READ`/`PERMISSION_FILES_WRITE` (existing) |
-| `stt` | speech-to-text | — | `PERMISSION_AUDIO` (existing) |
-| `tts` | text-to-speech | — | `PERMISSION_AUDIO` (existing) |
 | `scheduler` | fire an action/event once after a delay, or repeatedly on a cron expr | `database` (persist schedule state across restarts) | `PERMISSION_SCHEDULER` (existing) |
 | `vector-db` | embedding upsert/similarity search (`vec_upsert`/`vec_query`) | — | own storage backend, standalone |
 | `search` | web search (grounding, not just fetch) | `network` | none beyond `network`'s |
@@ -138,34 +138,260 @@ Most of the above needs **no** kernel change — `PERMISSION_NETWORK`,
 `PERMISSION_FILES_READ`/`WRITE`, `PERMISSION_SYSTEM`, `PERMISSION_AUDIO`,
 `PERMISSION_NOTIFY`, `PERMISSION_SCHEDULER`, `PERMISSION_BROWSER`,
 `PERMISSION_IPC_SEND` already exist in
-`wire/proto/veyron_protocol.proto:107-123` and cover `filesystem`, `stt`/
-`tts`, `system`/`window`, `notify`, `scheduler`, `browser` respectively.
+`wire/proto/veyron_protocol.proto:107-124` and cover `filesystem`, `system`/
+`window`, `notify`, `scheduler`, `browser` respectively. `stt`/`tts` shipped
+with **zero** kernel changes (no declared permissions — local ONNX runs
+in-process, cloud providers route through `network`).
 
 What's actually new, in `veyron`:
 
-- **Proto enum addition** — 6 new `PermissionType` values, next free number
-  is 14 (7 and old `PERMISSION_AI` are `reserved`, don't reuse): `SECRETS`
-  (`secrets`), `STORAGE` (`database`), `CLIPBOARD` (`clipboard`), `LAUNCH`
-  (`launcher`), `SCREEN` (`screenshot`), `HOME` (`home`).
-- **Manual sync to `sdk/python/proto/veyron_protocol.proto` and
-  `sdk/cpp/proto/veyron_protocol.proto`** — these are plain copies of
-  `wire/proto/veyron_protocol.proto`, not symlinks, no sync tooling exists.
-  Every enum addition above needs copying into both by hand. (Separately:
-  `scripts/gen_proto_python.py` points at a `proto/` path that no longer
-  holds the file — pre-existing breakage, not part of this batch.)
+- **Proto enum addition — protocol v1.4.** 5 new `PermissionType` values;
+  the next free number is **15** (`PERMISSION_STORAGE = 14` shipped with
+  `database`; 7 and old `PERMISSION_AI` are `reserved`, don't reuse):
+
+  | Value | Permission | Plugin |
+  |---|---|---|
+  | 15 | `PERMISSION_SECRETS` | `secrets` |
+  | 16 | `PERMISSION_CLIPBOARD` | `clipboard` |
+  | 17 | `PERMISSION_LAUNCH` | `launcher` |
+  | 18 | `PERMISSION_SCREEN` | `screenshot` |
+  | 19 | `PERMISSION_HOME` | `home` |
+
+  Values must stay **contiguous (15–19)**: the installer's
+  `known_permissions()` probe (`veyron/src/marketplace/installer.rs:25`)
+  walks enum codes and stops after 4 consecutive misses, so a gap ≥4
+  silently rejects installs of any plugin declaring a later value. Bump
+  the `// v 1.3` header to `// v 1.4` in the same edit. The kernel's own
+  `M9` (zero-value enum renumber, wire-breaking) is gated on the next
+  protocol bump — this is that bump; it lands here, not as a separate
+  change.
+- **Regenerate `veyron-wire` prost types.** `known_permissions()`
+  (kernel `R8-01`) and the JWT `permissions` claims (free-form strings)
+  auto-adopt the new values once the generated `PermissionType` includes
+  them — no kernel Rust source change needed. Until regeneration, `vyn
+  plugin install` rejects any plugin.json declaring a new permission
+  (`Plugin 'secrets' declares unknown permission 'PERMISSION_SECRETS'`).
+- **Proto-copy sync — 3 copies remain, 2 drifted.** The kernel repo no
+  longer vendors any proto: `src/proto.rs` is
+  `pub use veyron_wire::proto::veyron;`, so the crate is already the single
+  source of protocol truth for kernel + SDK-rust. The R8-05 byte-identity
+  test (`tests/unit/test_proto_sync.rs`) guards the remaining copies
+  against each other:
+  - `veyron-wire/proto/veyron_protocol.proto` — published crate, the
+    source of regeneration;
+  - `veyron-sdk-python/proto/...` + `veyron-sdk-cpp/proto/...` —
+    **already drifted**: both sit on `v 1.2`, missing
+    `PERMISSION_EVENT_PUBLISH`/`PERMISSION_STORAGE`, the R6 streaming
+    messages (`ActionRequestChunk`/`ActionResponseChunk`/
+    `ActionStreamAbort`/`SessionClose`), `EventPublish*`, and
+    `ActionRequest.caller_plugin_id`. Sync both to v1.4 in one pass —
+    until then Python/C++ plugins can't declare storage/event-publish or
+    stream. The generated Python binding
+    (`veyron-sdk-python/veyron/veyron_protocol_pb2.py`) is marker-checked
+    by the same test.
+  Also add `pub const PROTOCOL_VERSION` to veyron-wire — today the protocol
+  version lives only in the proto header comment (`// v 1.3`). Long-term:
+  vendor the .proto as an asset inside the veyron-wire crate and have SDK
+  build scripts generate from the *installed package* — removes vendoring
+  entirely, so the SDKs can't drift even in principle.
+  (Separately: `scripts/gen_proto_python.py` points at a `proto/` path
+  that no longer holds the file — pre-existing breakage, not part of this
+  batch.)
 - **`src/auth/permissions.rs::required_permission_for_action`** — only
   needs an entry if a new plugin's action is *providable through another
   plugin* (the anti-laundering pattern that exists for `http_request` →
-  `PermissionNetwork` today). Evaluate per-plugin as each one lands, not a
-  bulk change now.
+  `PermissionNetwork` today). None of the planned plugins expose a
+  primitive like that, so no additions expected — evaluate per-plugin as
+  each one lands, not a bulk change now.
 - **`daemon`'s always-on lifecycle** — found no autostart/enabled concept
   in `config.yaml` or the plugin manager; every plugin today looks
   spawned the same way. Needs a real look (supervisor or config change)
   once `daemon` design starts — open question, not yet scoped.
 
-No IPC/framing/orchestrator changes needed beyond that.
+No new Envelope payloads, IPC, framing, or orchestrator changes needed:
+every planned plugin fits the existing `ActionRequest`/`Event`/
+`EventPublish`/IPC/streaming/`AudioStreamChunk` + WebSocket surfaces.
 
-## Non-goals
+## Infrastructure Evolution: Plugin Distribution & Registry
+
+A single distribution format for plugins, built so the format itself never
+needs a breaking change (additive fields, lenient parsing) and the artifact
+host is swappable (relative URLs). **Normative schema:** `veyron/docs/
+PLUGIN_REGISTRY_SCHEMA.md` (kernel repo) — this file is the plan, that doc is
+the contract. `scripts/package.sh` is the one tool that writes both sides and
+must stay in sync with the schema.
+
+### Roles (delivery vs execution separation)
+
+- **`plugin.json`** (manifest) — *execution*: what runs, what it can do.
+  Lives inside the archive; the in-archive copy is authoritative.
+- **`registry.json`** — *delivery index*: what's available, where, per-version
+  sha256/signature. The machine source of truth the kernel reads.
+- **`dist/`** — *artifact store*: co-located per-version files for humans,
+  ops, and at-rest audit. **Not consumed by the kernel.** `package.sh`
+  generates the registry entry and the dist files from one computation, so
+  the two representations cannot drift.
+
+### 1. Distribution Store (`dist/`) — hierarchical
+
+```
+dist/{slug}/
+├── latest.json                    # {"version": "0.2.0"} — host-agnostic pointer
+├── assets/                        # version-agnostic: icon.png, setup.md, dependencies.json
+└── versions/{version}/
+    ├── {slug}-{version}.zip       # binary archive
+    ├── {slug}-{version}-src.zip   # source archive (audit)
+    ├── plugin.json                # manifest of this version (browse without downloading)
+    ├── checksum.sha256
+    └── signature.sig
+```
+
+- **Version isolation**: one folder per release → retention, rollback,
+  partial mirroring, per-folder CDN cache control, per-plugin storage
+  management on a self-hosted VPS.
+- **`latest.json` instead of a symlink**: GitHub raw / static CDNs do not
+  follow symlinks. The kernel does not depend on it either — it resolves
+  latest as semver-max over the registry `versions` map **among entries with
+  `status: stable` (or absent status), falling back to any version when no
+  stable exists** (zero drift). `latest.json` is for humans/ops/mirroring.
+- **`assets/`** (not `resources/`) to avoid confusion with the manifest's
+  `files` field. `dependencies.json` here lists *system* packages for the
+  kernel's optional auto-check — distinct from the registry's plugin
+  `dependencies`.
+- The per-version `plugin.json`/`checksum.sha256`/`signature.sig` are for
+  manual verification and browsing; the registry carries the same values
+  (same computation, two outputs).
+- **The browse-copy `plugin.json` is NOT covered by the entry signature**
+  (only the zip's sha256 is signed). The kernel must never read it — the
+  authoritative manifest is the one inside the zip, which IS covered via the
+  signed zip hash. Browse copy is humans-only.
+
+### 2. Registry Evolution (`registry.json`)
+
+Array → object map keyed by slug. The kernel parser already accepts this form
+and the R10-03 cache is ready:
+
+```json
+{
+  "meta": { "apiVersion": 2, "lastUpdated": "2026-08-13" },
+  "revoked": ["evil@1.0.0"],
+  "ai": {
+    "name": "AI",
+    "description": "Provider-agnostic LLM chat completion.",
+    "category": "ai",
+    "tags": ["llm"],
+    "status": "stable",
+    "source_url": "https://github.com/veyron-core/veyron-plugins/tree/main/plugins/ai",
+    "versions": {
+      "0.1.0": {
+        "archive_url": "dist/ai/versions/0.1.0/ai-0.1.0.zip",
+        "sha256": "<hex>",
+        "signature": "<hex>",
+        "min_kernel_version": "0.1.0",
+        "max_kernel_version": "*",
+        "dependencies": { "network": ">=0.1.0" }
+      }
+    }
+  }
+}
+```
+
+- **Relative `archive_url`** — resolved against the registry's own base URL.
+  Moving the store GitHub → own VPS → Cloudflare R2, or pointing at a
+  community marketplace, is a one-line `registry_url` change in config.yaml.
+  Nothing gets re-published.
+- **No permissions in the registry** — execution metadata lives in the
+  manifest (inside the archive); duplicating it in the registry would only
+  drift. `vyn plugin search` surfaces name/description/category instead.
+- **`status`** (`stable`/`beta`/`deprecated`/`hidden`/`revoked`) — only
+  `revoked` is kernel-enforced (R10-03): the root `revoked: ["slug",
+  "slug@version"]` list folds into entries, `vyn install` refuses, entries
+  stay listed with a `[revoked]` marker, and revocation outlives the cache
+  TTL. Default at slug level; an optional `versions[].status` overrides it
+  per version (e.g. `0.1.0` stable, `0.2.0` beta).
+- **`dependencies: { "slug": ">=semver" }`** — install-time, transitive:
+  `vyn install` resolves and installs prerequisites first, refuses on version
+  mismatch. **Kernel-enforced** — a plugin whose deps aren't installed is not
+  installable. Load-time ordering stays the manifest's existing `requires`
+  (already enforced: missing deps / cycles refuse the plugin).
+  **Range syntax is deliberately limited to `>=x.y.z` or exact `x.y.z`** —
+  no caret/tilde/AND-OR. The resolver stays a simple recursive walk with
+  cycle detection (same shape as `requires`); a full npm-style resolver is
+  out of scope for the dumb kernel.
+- **`meta`** — lastUpdated + apiVersion for cache invalidation (R10-03
+  echoes it into `registry-cache.json`, accepts `apiVersion`/`api_version`).
+- **One active registry per install** — `registry_url` + `marketplace_public_key`
+  config.yaml overrides already exist. A community marketplace is another URL
+  + key the operator chooses to pin (entries must verify against that key).
+  Multi-registry aggregation/search is future work and not blocked by the
+  format.
+
+### 3. Manifest Optimization (`plugin.json`)
+
+- **Clean-up**: remove delivery data (`archive_url`, `sha256`) from the
+  manifest — it lives in the registry now.
+- **Per-action specification**: `actions` become objects, not strings:
+  `[{ "name": "http_request", "permission": "network", "input": {...}, "output": {...} }]`.
+  The per-action `permission` makes the kernel's anti-laundering check
+  (`required_permission_for_action`, today hardcoded for `http_request` →
+  `PERMISSION_NETWORK`) **data-driven**: any caller without the permission is
+  denied, whatever the action. Input/output schemas serve Veyron Web and the
+  future `agent` tool dispatch. The declared `permissions` set stays as-is —
+  kernel Steps 3/4 (unknown permission, config-grant cross-check) unchanged.
+- **`config_schema`** — JSON Schema (draft-07 subset), not a custom format.
+  Veyron Web auto-generates settings forms; the plugin validates its own
+  config. The kernel does not validate (dumb core).
+- **`files`** (renamed from `resources`) — explicit list of files extracted
+  from the archive into the plugin's working directory. Doubles as the
+  **extraction allowlist**: the installer extracts only the declared files
+  and ignores the rest (tighter than "extract everything" on top of the
+  zip-bomb limits). Renamed to avoid confusion with `dist/{slug}/assets/`.
+- **No `api_level`** — decided against. The kernel is a dumb router; its
+  plugin-visible contract is the wire format + the permission enum, both of
+  which live in `veyron-wire` (below). Compatibility is fully covered by:
+  `kernel_compatibility_range` (semver — the gate), the installer's
+  `known_permissions()` probe (new permissions are adopted automatically when
+  the kernel bumps its veyron-wire dependency), and additive/lenient manifest
+  parsing (unknown fields ignored). A separate api_level axis would need a
+  mapping table maintained forever — YAGNI. If a plugin-visible kernel
+  behavior ever genuinely needs gating, add one optional manifest field then.
+
+### 4. Protocol single source (`veyron-wire`)
+
+The kernel already consumes every protocol type from the crate: `src/proto.rs`
+is `pub use veyron_wire::proto::veyron;` and `known_permissions()` probes the
+generated `PermissionType`. A protocol/permission change is therefore already
+"bump veyron-wire → kernel + SDK-rust adopt via the dependency." Remaining work:
+
+- Add `pub const PROTOCOL_VERSION` to veyron-wire — today the version lives
+  only in the proto header comment (`// v 1.3`).
+- Sync the two remaining vendored copies (`veyron-sdk-python/proto`,
+  `veyron-sdk-cpp/proto`, both drifted to `v 1.2`) to v1.4; fix
+  `scripts/gen_proto_python.py` (stale `proto/` path); the R8-05 byte-identity
+  test + pb2 marker check already guard them.
+- Long-term: vendor the .proto as an asset inside the veyron-wire crate and
+  have SDK build scripts generate from the *installed package* — removes
+  vendoring entirely, so the SDKs cannot drift even in principle.
+
+### 5. Signing
+
+Trust model unchanged (T-11): Ed25519 over `{slug}:{version}:{sha256}`,
+verified against the pinned `MAINTAINER_PUBLIC_KEY_HEX` (or the
+`marketplace_public_key` override for private/community registries). The
+maintainer signs locally with a personal offline key; `scripts/package.sh`
+gains a sign step (key from env/file, never committed). Host migration never
+touches keys — only `registry_url`.
+
+### Sequencing
+
+1. **Registry v2 + dist/ hierarchy + package.sh** — map form, relative URLs,
+   `dependencies`, new dist layout, signing step. Kernel is already tolerant;
+   one PR in this repo.
+2. **wire housekeeping** — `PROTOCOL_VERSION` const, sync SDK copies to v1.4,
+   fix `gen_proto_python.py`.
+3. **Manifest v2** — per-action permissions + `config_schema`; touches every
+   plugin, kernel load-time checks, and Veyron Web.
+
 
 - No plugin-to-plugin direct calls — everything routes through the kernel,
   same as `ai` → `network` today.
