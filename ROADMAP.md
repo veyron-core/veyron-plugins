@@ -22,7 +22,7 @@ Dependency order — each row can start once everything in "depends on" ships.
 
 | Plugin | Purpose | Depends on | Permissions |
 |---|---|---|---|
-| `secrets` | encrypted credential/API-key vault (`secret_get`/`secret_set`) | — | `PERMISSION_SECRETS` (new) |
+| `secrets` | encrypted credential/API-key vault (`secret_get`/`secret_set`) | — | `PERMISSION_SECRETS` (defined, proto v1.4) |
 | `filesystem` | sandboxed file read/write + read-only browse (`ls`/`cat` equivalents: `fs_list`/`fs_read`) — no exec, no shell | — | `PERMISSION_FILES_READ`/`PERMISSION_FILES_WRITE` (existing) |
 | `scheduler` | fire an action/event once after a delay, or repeatedly on a cron expr | `database` (persist schedule state across restarts) | `PERMISSION_SCHEDULER` (existing) |
 | `vector-db` | embedding upsert/similarity search (`vec_upsert`/`vec_query`) | — | own storage backend, standalone |
@@ -30,13 +30,13 @@ Dependency order — each row can start once everything in "depends on" ships.
 | `notify` | push/desktop/webhook notifications | — | `PERMISSION_NOTIFY` (existing) |
 | `email` | send/receive mail (SMTP/IMAP) | `network`, `secrets` (mailbox creds) | `network` (caller of gated `http_request`) |
 | `image` | image gen + vision (describe/OCR) | `network` (provider API), `secrets` | `network` (caller of gated `http_request`) |
-| `clipboard` | read/write system clipboard | — | `PERMISSION_CLIPBOARD` (new) |
+| `clipboard` | read/write system clipboard | — | `PERMISSION_CLIPBOARD` (defined, proto v1.4) |
 | `system` | query host info (battery, procs, volume, screen lock) | — | `PERMISSION_SYSTEM` (existing) — broad access, keep strict |
-| `launcher` | launch apps/games by name — Steam (`steam://rungameid/<id>`, reads `libraryfolders.vdf`/`appmanifest_*.acf`) as one provider, generic app launch as another | `filesystem` (read manifests) | `PERMISSION_LAUNCH` (new) |
+| `launcher` | launch apps/games by name — Steam (`steam://rungameid/<id>`, reads `libraryfolders.vdf`/`appmanifest_*.acf`) as one provider, generic app launch as another | `filesystem` (read manifests) | `PERMISSION_LAUNCH` (defined, proto v1.4) |
 | `media` | control media playback (play/pause/skip/volume) — Spotify/YouTube API or MPRIS/media-keys locally | `network` (remote providers), `secrets` | `network` (caller of gated `http_request`) |
-| `screenshot` | capture screen/window, optional OCR | `image` (OCR) | `PERMISSION_SCREEN` (new) |
+| `screenshot` | capture screen/window, optional OCR | `image` (OCR) | `PERMISSION_SCREEN` (defined, proto v1.4) |
 | `window` | list/focus/switch/minimize/maximize open windows | — | `PERMISSION_SYSTEM` (existing, shares scope with `system`) |
-| `home` | home automation over a custom protocol to bare-metal devices (ESP32/Arduino) — not Home Assistant/MQTT, own wire format | `network` (or serial/BLE transport, TBD) | `PERMISSION_HOME` (new) |
+| `home` | home automation over a custom protocol to bare-metal devices (ESP32/Arduino) — not Home Assistant/MQTT, own wire format | `network` (or serial/BLE transport, TBD) | `PERMISSION_HOME` (defined, proto v1.4) |
 | `browser` | read/control active browser tab (url/title/DOM/screenshot) — native-messaging host (the actual plugin, built on `veyron-sdk-rust`) + a browser extension (Chrome/Firefox) as the tab-access side | — | `PERMISSION_BROWSER` (existing, unused today) |
 | `notes` | note CRUD | `database` | none |
 | `calendar` | event CRUD + reminders + `notify` on due | `database`, `scheduler`, `notify` | none |
@@ -152,9 +152,10 @@ in-process, cloud providers route through `network`).
 
 What's actually new, in `veyron`:
 
-- **Proto enum addition — protocol v1.4.** 5 new `PermissionType` values;
-  the next free number is **15** (`PERMISSION_STORAGE = 14` shipped with
-  `database`; 7 and old `PERMISSION_AI` are `reserved`, don't reuse):
+- **Proto enum addition — protocol v1.4.** **Shipped** (wire housekeeping,
+  `veyron-wire` 0.2.1): 5 new `PermissionType` values **15–19** defined
+  (`PERMISSION_STORAGE = 14` shipped with `database`; 7 and old
+  `PERMISSION_AI` are `reserved`, don't reuse):
 
   | Value | Permission | Plugin |
   |---|---|---|
@@ -164,40 +165,32 @@ What's actually new, in `veyron`:
   | 18 | `PERMISSION_SCREEN` | `screenshot` |
   | 19 | `PERMISSION_HOME` | `home` |
 
-  Values must stay **contiguous (15–19)**: the installer's
+  Values are **contiguous (15–19)** — the installer's
   `known_permissions()` probe (`veyron/src/marketplace/installer.rs:25`)
-  walks enum codes and stops after 4 consecutive misses, so a gap ≥4
-  silently rejects installs of any plugin declaring a later value. Bump
-  the `// v 1.3` header to `// v 1.4` in the same edit. The kernel's own
-  `M9` (zero-value enum renumber, wire-breaking) is gated on the next
-  protocol bump — this is that bump; it lands here, not as a separate
-  change.
-- **Regenerate `veyron-wire` prost types.** `known_permissions()`
-  (kernel `R8-01`) and the JWT `permissions` claims (free-form strings)
-  auto-adopt the new values once the generated `PermissionType` includes
-  them — no kernel Rust source change needed. Until regeneration, `vyn
-  plugin install` rejects any plugin.json declaring a new permission
-  (`Plugin 'secrets' declares unknown permission 'PERMISSION_SECRETS'`).
-- **Proto-copy sync — 3 copies remain, 2 drifted.** The kernel repo no
-  longer vendors any proto: `src/proto.rs` is
-  `pub use veyron_wire::proto::veyron;`, so the crate is already the single
-  source of protocol truth for kernel + SDK-rust. The R8-05 byte-identity
-  test (`tests/unit/test_proto_sync.rs`) guards the remaining copies
-  against each other:
-  - `veyron-wire/proto/veyron_protocol.proto` — published crate, the
-    source of regeneration;
-  - `veyron-sdk-python/proto/...` + `veyron-sdk-cpp/proto/...` —
-    **already drifted**: both sit on `v 1.2`, missing
-    `PERMISSION_EVENT_PUBLISH`/`PERMISSION_STORAGE`, the R6 streaming
-    messages (`ActionRequestChunk`/`ActionResponseChunk`/
-    `ActionStreamAbort`/`SessionClose`), `EventPublish*`, and
-    `ActionRequest.caller_plugin_id`. Sync both to v1.4 in one pass —
-    until then Python/C++ plugins can't declare storage/event-publish or
-    stream. The generated Python binding
-    (`veyron-sdk-python/veyron/veyron_protocol_pb2.py`) is marker-checked
-    by the same test.
-  Also add `pub const PROTOCOL_VERSION` to veyron-wire — today the protocol
-  version lives only in the proto header comment (`// v 1.3`). Long-term:
+  walks enum codes and stops after 4 consecutive misses, so a gap ≥4 would
+  silently reject installs of any plugin declaring a later value. The
+  `// v 1.4` header bump landed in the same change. The kernel's own `M9`
+  (zero-value enum renumber, wire-breaking) was gated on this protocol bump
+  and lands with it.
+- **Regenerate `veyron-wire` prost types.** **Shipped** — the generated
+  `PermissionType` (prost, build-time from the proto) includes the new
+  values; `known_permissions()` (kernel `R8-01`) and the JWT `permissions`
+  claims (free-form strings) adopt them automatically, no kernel Rust
+  source change needed. `vyn plugin install` now accepts manifests
+  declaring the new permissions (e.g. `PERMISSION_SECRETS`).
+- **Proto-copy sync — all three copies on v1.4.** **Shipped** — the kernel
+  repo vendors no proto (`src/proto.rs` is
+  `pub use veyron_wire::proto::veyron;`), so the crate is the single source
+  of protocol truth for kernel + SDK-rust. The R8-05 byte-identity test
+  (`tests/unit/test_proto_sync.rs`) guards the remaining copies:
+  - `veyron-wire/proto/veyron_protocol.proto` — the source of regeneration;
+  - `veyron-sdk-python/proto/...` + `veyron-sdk-cpp/proto/...` — synced to
+    v1.4 (previously on v1.2/v1.3); the Python binding
+    (`veyron-sdk-python/veyron/veyron_protocol_pb2.py`) was regenerated via
+    `scripts/gen_proto_python.py` and the R8-05 marker check extended to
+    the five new permission values.
+  `pub const PROTOCOL_VERSION` (`"1.4"`) was added to `veyron-wire`
+  alongside — it mirrors the proto header comment (`// v 1.4`). Long-term:
   vendor the .proto as an asset inside the veyron-wire crate and have SDK
   build scripts generate from the *installed package* — removes vendoring
   entirely, so the SDKs can't drift even in principle.
@@ -369,12 +362,14 @@ is `pub use veyron_wire::proto::veyron;` and `known_permissions()` probes the
 generated `PermissionType`. A protocol/permission change is therefore already
 "bump veyron-wire → kernel + SDK-rust adopt via the dependency." Remaining work:
 
-- Add `pub const PROTOCOL_VERSION` to veyron-wire — today the version lives
-  only in the proto header comment (`// v 1.3`).
-- Sync the two remaining vendored copies (`veyron-sdk-python/proto`,
-  `veyron-sdk-cpp/proto`, both drifted to `v 1.2`) to v1.4; fix
-  `scripts/gen_proto_python.py` (stale `proto/` path); the R8-05 byte-identity
-  test + pb2 marker check already guard them.
+- ~~Add `pub const PROTOCOL_VERSION` to veyron-wire~~ — **done** (0.2.1,
+  `"1.4"`); it now mirrors the proto header comment.
+- ~~Sync the vendored copies + fix `gen_proto_python.py`~~ — **done**:
+  `veyron-sdk-python/proto` and `veyron-sdk-cpp/proto` are on v1.4 (they
+  were on v1.2/v1.3), the Python binding was regenerated, and the R8-05
+  byte-identity test + pb2 marker check guard them (markers extended to the
+  new permission values). `gen_proto_python.py` was repaired earlier and
+  verified working.
 - Long-term: vendor the .proto as an asset inside the veyron-wire crate and
   have SDK build scripts generate from the *installed package* — removes
   vendoring entirely, so the SDKs cannot drift even in principle.
