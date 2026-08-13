@@ -1,28 +1,88 @@
 #!/usr/bin/env bash
-# Build a release archive for a plugin, register/update it in registry.json.
+# Build a release archive for a plugin and register it in registry.json (v2).
+#
+# This is the single tool that writes BOTH sides of the distribution store
+# from one computation:
+#   1. the hierarchical dist/ tree, and
+#   2. the slug-keyed registry.json (v2 map) entry.
+#
+# dist/ layout written:
+#   dist/<slug>/latest.json                 # {"version": "<latest registered>"}
+#   dist/<slug>/assets/                     # (reserved for future asset hosting; not created here)
+#   dist/<slug>/versions/<version>/
+#       <slug>-<version>.zip                # binary + plugin.json (flat)
+#       <slug>-<version>-src.zip            # plugin.json + src/ + Cargo.toml
+#       plugin.json                         # browse copy of the manifest
+#       checksum.sha256                     # "<sha256>  <slug>-<version>.zip" (two spaces)
+#       signature.sig                       # Ed25519 sig over "<slug>:<version>:<sha256>" (128 hex + newline)
+#
+# registry.json (v2) shape written:
+#   {
+#     "meta":    { "apiVersion": 2, "lastUpdated": "<YYYY-MM-DD>" },
+#     "revoked": [],
+#     "<slug>": {
+#       "name": ..., "description": ..., "category": ..., "tags": [...],
+#       "status": ..., "source_url": ...,
+#       "versions": {
+#         "<version>": {
+#           "archive_url": ..., "sha256": ..., "signature": ...,
+#           "min_kernel_version": ..., "max_kernel_version": ...
+#         }
+#       }
+#     }
+#   }
+#   Top-level key order is meta, revoked, then slugs alphabetically. A manifest
+#   `requires` array (non-empty) adds a per-version "dependencies" map
+#   (dep -> version range, default ">=0.0.0").
+#
+# Signing (optional):
+#   VEYRON_SIGNING_KEY_HEX   64-hex-char Ed25519 seed (32 bytes)
+#   VEYRON_SIGNING_KEY_FILE  path to a file containing that 64-hex-char seed
+#   If either is set, the archive is signed over the ASCII message
+#   "<slug>:<version>:<sha256>", signature.sig is written, and the registry
+#   entry's "signature" is set. The signature is self-verified against the key
+#   that produced it (abort loudly on failure), and cross-checked against the
+#   kernel's pinned public key (warn, do not abort, when it differs). With no
+#   key configured, the entry gets an empty signature (rejected by `vyn install`
+#   until signed) and no signature.sig is written.
 #
 # Usage:
-#   scripts/package.sh <plugin-dir-name> "<Display Name>" "<description>"
+#   scripts/package.sh <plugin-dir-name> "<Display Name>" "<Description>" \
+#       [--category <cat>] [--tags t1,t2] [--status <status>]
 #
-# Example:
-#   scripts/package.sh network "Network" "Outbound HTTP for plugins/kernel via one http_request action."
-#
-# Reads plugins/<plugin-dir-name>/plugin.json for plugin_id (slug), version,
-# binary name, permissions, and kernel_compatibility_range. Builds the
-# release binary, writes dist/<slug>-<version>.zip (binary + plugin.json,
-# flat) and dist/<slug>-<version>-src.zip (plugin.json + src/ + Cargo.toml),
-# then inserts or updates the matching entry in registry.json (matched by
-# slug; a new slug gets the next monotonically increasing zero-padded id).
 set -euo pipefail
 
-if [[ $# -ne 3 ]]; then
-    echo "usage: $0 <plugin-dir-name> <display-name> <description>" >&2
+positional=()
+category="utility"
+tags=""
+status="stable"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --category)
+            if [[ $# -lt 2 ]]; then echo "error: --category requires a value" >&2; exit 1; fi
+            category="$2"; shift 2 ;;
+        --tags)
+            if [[ $# -lt 2 ]]; then echo "error: --tags requires a value" >&2; exit 1; fi
+            tags="$2"; shift 2 ;;
+        --status)
+            if [[ $# -lt 2 ]]; then echo "error: --status requires a value" >&2; exit 1; fi
+            status="$2"; shift 2 ;;
+        -*)
+            echo "error: unknown option: $1" >&2; exit 1 ;;
+        *)
+            positional+=("$1"); shift ;;
+    esac
+done
+
+if [[ ${#positional[@]} -ne 3 ]]; then
+    echo "usage: $0 <plugin-dir-name> <display-name> <description> [--category <cat>] [--tags t1,t2] [--status <status>]" >&2
     exit 1
 fi
 
-plugin_dir_name="$1"
-display_name="$2"
-description="$3"
+plugin_dir_name="${positional[0]}"
+display_name="${positional[1]}"
+description="${positional[2]}"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 plugin_dir="$repo_root/plugins/$plugin_dir_name"
@@ -40,8 +100,7 @@ version=$(jq -r '.version' "$manifest")
 binary=$(jq -r '.binary' "$manifest")
 min_kernel=$(jq -r '.kernel_compatibility_range.min' "$manifest")
 max_kernel=$(jq -r '.kernel_compatibility_range.max' "$manifest")
-# registry permissions are lowercase, no PERMISSION_ prefix
-permissions_json=$(jq -c '[.permissions[] | ltrimstr("PERMISSION_") | ascii_downcase]' "$manifest")
+requires_json=$(jq -c '(.requires // [])' "$manifest")
 
 echo "==> building release binary for $plugin_dir_name ($slug $version)"
 cargo build --release --manifest-path "$plugin_dir/Cargo.toml"
@@ -52,11 +111,13 @@ if [[ ! -f "$bin_path" ]]; then
     exit 1
 fi
 
-mkdir -p "$dist_dir"
+version_dir="$dist_dir/$slug/versions/$version"
+mkdir -p "$version_dir"
+
 archive_name="$slug-$version.zip"
 src_archive_name="$slug-$version-src.zip"
-archive_path="$dist_dir/$archive_name"
-src_archive_path="$dist_dir/$src_archive_name"
+archive_path="$version_dir/$archive_name"
+src_archive_path="$version_dir/$src_archive_name"
 
 echo "==> writing $archive_name"
 rm -f "$archive_path"
@@ -66,57 +127,173 @@ echo "==> writing $src_archive_name"
 rm -f "$src_archive_path"
 src_stage=$(mktemp -d)
 trap 'rm -rf "$src_stage"' EXIT
-src_root="$src_stage/$plugin_dir_name-src"
+src_root="$src_stage/$slug-src"
 mkdir -p "$src_root"
 cp "$manifest" "$src_root/"
 cp -r "$plugin_dir/src" "$src_root/"
 cp "$plugin_dir/Cargo.toml" "$src_root/"
-(cd "$src_stage" && zip -rq "$src_archive_path" "$plugin_dir_name-src")
+(cd "$src_stage" && zip -rq "$src_archive_path" "$slug-src")
+
+echo "==> writing plugin.json browse copy"
+cp "$manifest" "$version_dir/plugin.json"
 
 sha256=$(sha256sum "$archive_path" | awk '{print $1}')
-archive_url="https://raw.githubusercontent.com/veyron-core/veyron-plugins/main/dist/$archive_name"
+printf '%s  %s\n' "$sha256" "$archive_name" > "$version_dir/checksum.sha256"
+
+archive_url="https://raw.githubusercontent.com/veyron-core/veyron-plugins/main/dist/$slug/versions/$version/$archive_name"
 source_url="https://github.com/veyron-core/veyron-plugins/tree/main/plugins/$plugin_dir_name"
 
+# ---- signing (optional) ----------------------------------------------------
+seed=""
+if [[ -n "${VEYRON_SIGNING_KEY_HEX:-}" ]]; then
+    seed="$VEYRON_SIGNING_KEY_HEX"
+elif [[ -n "${VEYRON_SIGNING_KEY_FILE:-}" ]]; then
+    seed="$(tr -d '[:space:]' < "$VEYRON_SIGNING_KEY_FILE")"
+fi
+
+signature=""
+if [[ -n "$seed" ]]; then
+    echo "==> signing $slug:$version:$sha256"
+    signature=$(python3 - "$seed" "$slug" "$version" "$sha256" <<'PYEOF'
+import sys
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+seed_hex, slug, version, sha256 = sys.argv[1:5]
+private_key = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(seed_hex))
+public_key = private_key.public_key()
+message = f"{slug}:{version}:{sha256}".encode("ascii")
+sig = private_key.sign(message)
+
+# Self-verify against the key that produced it: aborts loudly if the
+# signature does not verify (catches a signing bug before it ships).
+try:
+    public_key.verify(sig, message)
+except Exception as exc:
+    print(f"error: signature self-verification failed: {exc}", file=sys.stderr)
+    sys.exit(1)
+
+# Cross-check against the kernel's pinned public key. A mismatch means the
+# configured seed is not the production signing key: warn loudly (do not
+# abort, so key rotation / test keys are still usable), since `vyn install`
+# will reject the entry until it is signed by the real key.
+derived_hex = public_key.public_bytes(
+    encoding=serialization.Encoding.Raw,
+    format=serialization.PublicFormat.Raw,
+).hex()
+PINNED = "ed8c39a19dcbfed1a3a436b914a8ce9bf2b449c534808ce92c78adcfa2590928"
+if derived_hex != PINNED:
+    print(
+        f"warning: signing key public key {derived_hex} does not match the "
+        f"kernel's pinned public key {PINNED}; the entry will be rejected by "
+        f"`vyn install` until re-signed with the correct key",
+        file=sys.stderr,
+    )
+
+print(sig.hex())
+PYEOF
+)
+    printf '%s\n' "$signature" > "$version_dir/signature.sig"
+else
+    echo "warning: no signing key configured (VEYRON_SIGNING_KEY_HEX / VEYRON_SIGNING_KEY_FILE) — entry will have an empty signature; vyn install will reject it until signed" >&2
+    rm -f "$version_dir/signature.sig"
+fi
+
+# ---- registry.json upsert ------------------------------------------------
 echo "==> updating registry.json (slug=$slug)"
-python3 - "$registry" "$slug" "$display_name" "$description" "$version" \
-    "$permissions_json" "$archive_url" "$source_url" "$sha256" "$min_kernel" "$max_kernel" <<'PYEOF'
+python3 - "$registry" "$slug" "$display_name" "$description" "$category" "$tags" \
+    "$status" "$source_url" "$version" "$archive_url" "$sha256" "$signature" \
+    "$min_kernel" "$max_kernel" "$requires_json" <<'PYEOF'
+import datetime
 import json
 import sys
 
-(registry_path, slug, name, description, version, permissions_json,
- archive_url, source_url, sha256, min_kernel, max_kernel) = sys.argv[1:12]
+(registry_path, slug, name, description, category, tags_str, status,
+ source_url, version, archive_url, sha256, signature,
+ min_kernel, max_kernel, requires_json) = sys.argv[1:16]
 
-with open(registry_path) as f:
-    entries = json.load(f)
+requires = json.loads(requires_json) if requires_json else []
 
-permissions = json.loads(permissions_json)
+try:
+    with open(registry_path) as f:
+        registry = json.load(f)
+except (FileNotFoundError, json.JSONDecodeError):
+    registry = {}
 
-entry = {
-    "id": None,  # filled below
-    "slug": slug,
-    "name": name,
-    "description": description,
-    "version": version,
-    "permissions": permissions,
-    "archive_url": archive_url,
-    "source_url": source_url,
-    "sha256": sha256,
-    "min_kernel_version": min_kernel,
-    "max_kernel_version": max_kernel,
-}
+if not isinstance(registry, dict):
+    registry = {}
 
-existing = next((e for e in entries if e["slug"] == slug), None)
-if existing:
-    entry["id"] = existing["id"]
-    entries[entries.index(existing)] = entry
-else:
-    next_id = max((int(e["id"]) for e in entries), default=0) + 1
-    entry["id"] = f"{next_id:03d}"
-    entries.append(entry)
+meta = registry.get("meta", {})
+meta["apiVersion"] = 2
+meta["lastUpdated"] = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+revoked = registry.get("revoked", [])
+
+slug_entries = {k: v for k, v in registry.items() if k not in ("meta", "revoked")}
+
+entry = slug_entries.get(slug, {})
+entry["name"] = name
+entry["description"] = description
+entry["category"] = category
+entry["tags"] = [t for t in tags_str.split(",") if t] if tags_str else []
+entry["status"] = status
+entry["source_url"] = source_url
+
+versions = entry.get("versions", {})
+version_entry = versions.get(version, {})
+version_entry["archive_url"] = archive_url
+version_entry["sha256"] = sha256
+version_entry["signature"] = signature
+version_entry["min_kernel_version"] = min_kernel
+version_entry["max_kernel_version"] = max_kernel
+
+if requires:
+    dependencies = {dep: ">=0.0.0" for dep in requires}
+    version_entry["dependencies"] = dependencies
+
+versions[version] = version_entry
+entry["versions"] = versions
+slug_entries[slug] = entry
+
+# Rebuild in canonical top-level key order: meta, revoked, slugs alphabetical.
+out = {"meta": meta, "revoked": revoked}
+for s in sorted(slug_entries):
+    out[s] = slug_entries[s]
 
 with open(registry_path, "w") as f:
-    json.dump(entries, f, indent=2)
+    json.dump(out, f, indent=2)
     f.write("\n")
 PYEOF
 
-echo "==> done: $archive_path ($sha256)"
+# ---- latest.json ----------------------------------------------------------
+echo "==> updating dist/$slug/latest.json"
+latest_version=$(python3 - "$registry" "$slug" <<'PYEOF'
+import json
+import re
+import sys
+
+registry_path, slug = sys.argv[1:3]
+with open(registry_path) as f:
+    reg = json.load(f)
+versions = list(reg.get(slug, {}).get("versions", {}).keys())
+
+def semver_key(v):
+    m = re.match(r"^(\d+)\.(\d+)\.(\d+)$", v)
+    return tuple(int(x) for x in m.groups()) if m else (0, 0, 0)
+
+if not versions:
+    print(f"error: no versions registered for slug {slug}", file=sys.stderr)
+    sys.exit(1)
+
+print(max(versions, key=semver_key))
+PYEOF
+)
+printf '{\n  "version": "%s"\n}\n' "$latest_version" > "$dist_dir/$slug/latest.json"
+
+if [[ -n "$signature" ]]; then
+    signed="yes"
+else
+    signed="no"
+fi
+echo "==> done: $archive_path"
+echo "    sha256:  $sha256"
+echo "    signed:  $signed"

@@ -1,0 +1,12 @@
+{
+  "plugin_id": "database",
+  "version": "0.1.0",
+  "permissions": ["PERMISSION_STORAGE"],
+  "kernel_compatibility_range": {
+    "min": "0.1.0",
+    "max": "*"
+  },
+  "binary": "database",
+  "events": [],
+  "actions": ["db_get", "db_set", "db_delete", "db_batch_get", "db_query"]
+}
