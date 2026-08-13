@@ -170,8 +170,10 @@ What's actually new, in `veyron`:
   walks enum codes and stops after 4 consecutive misses, so a gap ≥4 would
   silently reject installs of any plugin declaring a later value. The
   `// v 1.4` header bump landed in the same change. The kernel's own `M9`
-  (zero-value enum renumber, wire-breaking) was gated on this protocol bump
-  and lands with it.
+  (zero-value enum renumber, wire-breaking) **missed** this bump and landed
+  on protocol **v1.5** (`veyron-wire` 0.2.2, 2026-08-13): `ActionStatus`/
+  `CommandStatus` now have `*_UNKNOWN = 0` so a missed `set_status()` fails
+  loudly instead of faking OK.
 - **Regenerate `veyron-wire` prost types.** **Shipped** — the generated
   `PermissionType` (prost, build-time from the proto) includes the new
   values; `known_permissions()` (kernel `R8-01`) and the JWT `permissions`
@@ -189,8 +191,8 @@ What's actually new, in `veyron`:
     (`veyron-sdk-python/veyron/veyron_protocol_pb2.py`) was regenerated via
     `scripts/gen_proto_python.py` and the R8-05 marker check extended to
     the five new permission values.
-  `pub const PROTOCOL_VERSION` (`"1.4"`) was added to `veyron-wire`
-  alongside — it mirrors the proto header comment (`// v 1.4`). Long-term:
+  `pub const PROTOCOL_VERSION` was added to `veyron-wire` alongside — it
+  mirrors the proto header comment (now `"1.5"` / `// v 1.5`). Long-term:
   vendor the .proto as an asset inside the veyron-wire crate and have SDK
   build scripts generate from the *installed package* — removes vendoring
   entirely, so the SDKs can't drift even in principle.
@@ -202,10 +204,10 @@ What's actually new, in `veyron`:
   `PermissionNetwork` today). None of the planned plugins expose a
   primitive like that, so no additions expected — evaluate per-plugin as
   each one lands, not a bulk change now.
-- **`daemon`'s always-on lifecycle** — found no autostart/enabled concept
-  in `config.yaml` or the plugin manager; every plugin today looks
-  spawned the same way. Needs a real look (supervisor or config change)
-  once `daemon` design starts — open question, not yet scoped.
+- **`daemon`'s always-on lifecycle** — resolved by the kernel's R10-01/R10-04
+  (2026-08): a plugin in `plugins.d/` is auto-spawned at boot and `vyn plugin
+  enable|disable <slug>` toggles that. `daemon` needs no kernel change — just
+  a drop-in file; no open question remains.
 
 No new Envelope payloads, IPC, framing, or orchestrator changes needed:
 every planned plugin fits the existing `ActionRequest`/`Event`/
@@ -295,7 +297,9 @@ and the R10-03 cache is ready:
 }
 ```
 
-- **Relative `archive_url`** — resolved against the registry's own base URL.
+- **`archive_url`** — the registry ships **absolute** URLs
+  (`https://raw.githubusercontent.com/...` today); the kernel's R10-03 parser
+  also accepts **relative** ones resolved against the registry's own base URL.
   Moving the store GitHub → own VPS → Cloudflare R2, or pointing at a
   community marketplace, is a one-line `registry_url` change in config.yaml.
   Nothing gets re-published.
@@ -389,15 +393,17 @@ touches keys — only `registry_url`.
    `dependencies`, new dist layout, signing step. Kernel is already tolerant;
    one PR in this repo. **Shipped** (PR #5).
 2. **wire housekeeping** — `PROTOCOL_VERSION` const, sync SDK copies to v1.4,
-   fix `gen_proto_python.py`. **Shipped** — wire is at protocol v1.4
-   (5 new `PermissionType` values 15–19) with `veyron_wire::PROTOCOL_VERSION`;
+   fix `gen_proto_python.py`. **Shipped** — wire is at protocol **v1.5**
+   (5 new `PermissionType` values 15–19 landed in v1.4, status-enum renumber
+   M9 in v1.5) with `veyron_wire::PROTOCOL_VERSION`;
    `veyron-sdk-python` + `veyron-sdk-cpp` vendored copies and the Python `pb2`
    binding synced (R8-05 byte-identity + marker checks pass); Rust
    `veyron-sdk` restored to the published 0.1.2 API surface (streaming methods
-   had gone missing from the repo) and bumped to 0.1.3; kernel consumes
-   `veyron-wire 0.2.1` / `veyron-sdk 0.1.3` via `[patch.crates-io]` git
-   overrides until the crates are published (`gen_proto_python.py` had already
-   been repaired in an earlier PR — verified working, no change needed).
+   had gone missing from the repo) and bumped to 0.1.3. **Both crates are
+   published** (2026-08-13) — `veyron-wire` **0.2.2**, `veyron-sdk` **0.1.3** —
+   and the kernel's `[patch.crates-io]` git overrides are **dropped**
+   (`gen_proto_python.py` had already been repaired in an earlier PR —
+   verified working, no change needed).
 3. **Manifest v2** — per-action permissions + `config_schema`; touches every
    plugin, kernel load-time checks, and Veyron Web. **Shipped for plugins +
    kernel** (all 6 manifests are v2, kernel parses object-form `actions`,

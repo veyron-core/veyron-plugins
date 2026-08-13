@@ -80,5 +80,47 @@
         "max_kernel_version": "*"
       }
     }
+  },
+  "stt": {
+    "name": "STT",
+    "description": "Speech-to-text via stt_transcribe + stt_models: in-process local ONNX (sherpa: zipformer/whisper) + openai audio cloud via network, gated by PERMISSION_NETWORK.",
+    "category": "audio",
+    "tags": [
+      "stt",
+      "audio",
+      "speech"
+    ],
+    "status": "stable",
+    "source_url": "https://github.com/veyron-core/veyron-plugins/tree/main/plugins/stt",
+    "versions": {
+      "0.2.0": {
+        "archive_url": "https://raw.githubusercontent.com/veyron-core/veyron-plugins/main/dist/stt/versions/0.2.0/stt-0.2.0.zip",
+        "sha256": "97cd80a5872da1ad043d4ddc9cb2dd712ba9a54494bf32d67e0018a854fa8249",
+        "signature": "1bf3a3f283b3c860f6373a0007ad16b64e437f687ab1c59d48bfbed93f6e6f5118f37662d3ddf40036331c800203bfc812d1e4b2a65c71db7b93adfab6e90407",
+        "min_kernel_version": "0.1.0",
+        "max_kernel_version": "*"
+      }
+    }
+  },
+  "tts": {
+    "name": "TTS",
+    "description": "Text-to-speech via tts_synthesize + tts_voices: in-process local ONNX (sherpa: Kokoro/Piper) + openai/elevenlabs cloud via network, gated by PERMISSION_NETWORK.",
+    "category": "audio",
+    "tags": [
+      "tts",
+      "audio",
+      "speech"
+    ],
+    "status": "stable",
+    "source_url": "https://github.com/veyron-core/veyron-plugins/tree/main/plugins/tts",
+    "versions": {
+      "0.2.0": {
+        "archive_url": "https://raw.githubusercontent.com/veyron-core/veyron-plugins/main/dist/tts/versions/0.2.0/tts-0.2.0.zip",
+        "sha256": "6cb495e9bc2215ffe44b6114f86812136bf7d893224cc44970bb334c7b1e4ebb",
+        "signature": "c8764e9a8a16174c644a92c2144b2781aabf05d8779eca270f9caad224f0857295d4d93c69d3831ceacace12392f67720f2346c232403856b1b3d53743c35e02",
+        "min_kernel_version": "0.1.0",
+        "max_kernel_version": "*"
+      }
+    }
   }
 }
