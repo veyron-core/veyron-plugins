@@ -201,9 +201,8 @@ What's actually new, in `veyron`:
   vendor the .proto as an asset inside the veyron-wire crate and have SDK
   build scripts generate from the *installed package* — removes vendoring
   entirely, so the SDKs can't drift even in principle.
-  (Separately: `scripts/gen_proto_python.py` points at a `proto/` path
-  that no longer holds the file — pre-existing breakage, not part of this
-  batch.)
+  (`scripts/gen_proto_python.py` was repaired earlier — it regenerates the
+  Python binding from `../veyron-wire/proto/` and works.)
 - **`src/auth/permissions.rs::required_permission_for_action`** — only
   needs an entry if a new plugin's action is *providable through another
   plugin* (the anti-laundering pattern that exists for `http_request` →
@@ -395,7 +394,15 @@ touches keys — only `registry_url`.
    `dependencies`, new dist layout, signing step. Kernel is already tolerant;
    one PR in this repo. **Shipped** (PR #5).
 2. **wire housekeeping** — `PROTOCOL_VERSION` const, sync SDK copies to v1.4,
-   fix `gen_proto_python.py`.
+   fix `gen_proto_python.py`. **Shipped** — wire is at protocol v1.4
+   (5 new `PermissionType` values 15–19) with `veyron_wire::PROTOCOL_VERSION`;
+   `veyron-sdk-python` + `veyron-sdk-cpp` vendored copies and the Python `pb2`
+   binding synced (R8-05 byte-identity + marker checks pass); Rust
+   `veyron-sdk` restored to the published 0.1.2 API surface (streaming methods
+   had gone missing from the repo) and bumped to 0.1.3; kernel consumes
+   `veyron-wire 0.2.1` / `veyron-sdk 0.1.3` via `[patch.crates-io]` git
+   overrides until the crates are published (`gen_proto_python.py` had already
+   been repaired in an earlier PR — verified working, no change needed).
 3. **Manifest v2** — per-action permissions + `config_schema`; touches every
    plugin, kernel load-time checks, and Veyron Web. **Shipped for plugins +
    kernel** (all 6 manifests are v2, kernel parses object-form `actions`,
