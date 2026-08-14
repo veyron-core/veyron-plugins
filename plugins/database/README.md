@@ -68,14 +68,16 @@ pages are reused for subsequent writes.
 
 ## Concurrency
 
-Unlike `ai`/`network` (sequential `Plugin::run`), this plugin hand-rolls a
-concurrent loop per the roadmap's "hot-path plugins" pattern: one task owns
-the `VeyronClient` and `tokio::select!`s between inbound frames and an mpsc
-channel of completed responses that spawned handler tasks push into. The
-client is never behind a lock, so a handler replying can't deadlock against
-the loop parked in `recv()`. Each caller gets a cached `sqlx::SqlitePool`
-(WAL mode) for real parallelism. Replies may come back out of order — the
-kernel matches on `action_id`.
+Unlike `ai`/`tts`/`stt` (sequential `Plugin::run`), this is a hot-path
+plugin, so it drives the SDK's concurrent message loop
+(`ConcurrentHandler` + `serve_concurrent`, `veyron-sdk` ≥ 0.1.4): one task
+owns the `VeyronClient` and `tokio::select!`s between inbound frames and an
+mpsc channel of completed responses that spawned handler tasks push into.
+The client is never behind a lock, so a handler replying can't deadlock
+against the loop parked in `recv()`, and a panicking handler becomes an
+`ACTION_ERROR` response instead of a dropped reply. Each caller gets a
+cached `sqlx::SqlitePool` (WAL mode) for real parallelism. Replies may come
+back out of order — the kernel matches on `action_id`.
 
 ## Status
 
