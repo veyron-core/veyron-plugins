@@ -96,48 +96,59 @@ itself (JS, `tabs`/`scripting` permissions) relaying over
 
 ## Concurrency model for hot-path plugins
 
+**Shipped** (SDK `veyron-sdk` 0.1.4, `feat/concurrent-serve-loop`).
+
 The kernel protocol already supports multiple in-flight `ActionRequest`s per
 plugin connection — `action_id` is the correlation key end-to-end (see
 `ActionRequest`/`ActionResponse` in `wire/proto/veyron_protocol.proto`), the
 pending-action registry tracks them independently
 (`src/ipc/protocol.rs:568-577`), and there's already a per-caller concurrency
-cap (R6-03). Responses do not need to come back in request order.
+cap (R6-03). Responses do not need to come back in request order. No kernel
+or wire-protocol change was ever needed — this section is now purely a
+plugin-implementation pattern, and the pattern lives in the SDK.
 
-What's *not* concurrent today is the plugin side. The Rust SDK's default
-`serve()` loop (`veyron-sdk-rust/src/plugin.rs:117-147`) does
-`recv().await` → `on_message().await` → reply → next `recv()` — fully
-sequential, one request finishes before the next frame is even read off the
-socket. `ai` and `network` use a custom loop for an unrelated reason (need
-`&mut VeyronClient` inside the handler) but it's still sequential — fine for
-them, call volume is low and latency is network-bound anyway.
+The SDK's default `Plugin::serve()` loop is sequential
+(`recv().await` → `on_message().await` → reply → next `recv()`), which is
+fine for low-volume, network-bound plugins (`ai`, `tts`, `stt`) but wrong
+for storage-class plugins called far more often. The SDK now ships a
+concurrent message loop as a first-class facility (`veyron-sdk/src/concurrent.rs`,
+replacing the hand-rolled copies that `database` and `network` used to each
+maintain):
 
-`database` will be called far more often and needs real concurrency. Also:
-the kernel currently rejects a second connection registered under the same
-`plugin_id`, so multiplexing across sockets isn't an available escape hatch —
-concurrency has to happen within one connection.
+- `ConcurrentHandler` trait (`id`/`version`/`manifest`/`on_init`/`accept`/
+  `on_action`/`on_event`/`on_message`/`on_shutdown`) — implemented by the
+  plugin, invoked through `&self` from many concurrently running tasks, so
+  the plugin shares interior state (pools, caches) behind `Arc`.
+- `serve_concurrent(client, jwt, handler)` — registers, runs `on_init`, then
+  drives the loop to shutdown; plugin `main` functions no longer need their
+  own `PLUGIN_ID`/`PLUGIN_VERSION` constants.
+- `run_concurrent_loop(client, handler)` — the loop itself, for tests
+  against a pre-registered client (`UnixStream::pair`).
+- `response_envelope(action_id, result)` — the one shared
+  `ActionResponse`/`ACTION_ERROR` builder both plugins had duplicated.
+- The loop: one task owns the `VeyronClient` exclusively and
+  `tokio::select!`s between `client.recv()` and an mpsc channel of completed
+  responses; each inbound `ActionRequest` is `tokio::spawn`ed, so requests
+  run concurrently and replies may come back out of order (kernel matches on
+  `action_id`). The client is never behind a lock, so a replying handler
+  can't deadlock against the loop parked in `recv()`. A panicking handler is
+  caught by a double-spawn and becomes an `ACTION_ERROR` response instead of
+  a silently dropped reply.
+- Optional `accept(&req)` pre-spawn gate: run in the loop task to reject an
+  over-cap request without spawning a task at all (`network`'s per-caller
+  in-flight cap uses it; the authoritative reservation re-checks inside
+  `on_action`, since a slot may have been taken between gate and
+  acquisition).
 
-Plan for `database`, `vector-db`, and `scheduler` (and anything else on the
-hot path):
-
-- Don't use the SDK's sequential `serve()`. Custom loop: one task reads
-  frames off the UDS connection and `tokio::spawn`s a handler per incoming
-  `ActionRequest`; a single writer (mutex-guarded write-half, or an mpsc
-  channel funneled to one writer task) sends `ActionResponse`s back as they
-  complete, matched by `action_id`. Out-of-order replies are fine — the
-  kernel already handles that.
-- Internally, use an async connection pool (`sqlx::SqlitePool` or
-  `deadpool`) sized to N so concurrent requests get real parallelism, not
-  serialized await chains.
-- Batched actions where round-trip count matters more than payload size
-  (e.g. `db_batch_get`).
-- `notes`/`calendar` inherit this for free — they just call `database`,
-  they don't need their own concurrency handling.
-- Rust only for these — no Python/C++ SDK versions of `database` or
-  `vector-db`; hot-path plugins stay in the SDK with the async pool story.
-
-No kernel or protocol change needed for any of this — it's purely a
-plugin-implementation pattern change from the sequential loop `ai`/`network`
-established.
+`database` and `network` are migrated onto the SDK loop (their hand-rolled
+`run_loop`/`spawn_handler`/`response_envelope` copies are deleted); all their
+existing tests — including the deadlock-regression and per-caller-cap tests —
+pass unchanged. `vector-db`, `scheduler`, and anything else on the hot path
+get the pattern for free by implementing `ConcurrentHandler`. `notes`/
+`calendar` still inherit it for free — they just call `database`, they don't
+need their own concurrency handling. Rust only for these — no Python/C++
+SDK versions of `database` or `vector-db`; hot-path plugins stay in the SDK
+with the async pool story.
 
 ## Kernel-side changes needed (veyron repo, not this one)
 
