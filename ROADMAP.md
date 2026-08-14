@@ -15,6 +15,7 @@ file is the cross-plugin picture only.
 | `database` | `plugins/database/` | — | KV/SQL storage primitive, `PERMISSION_STORAGE`, per-caller SQLite file isolation |
 | `tts` | `plugins/tts/` | `network` (cloud providers) | text-to-speech — local ONNX (sherpa: Kokoro/Piper) in-process + openai/elevenlabs via `network`, declares `network` (caller of gated `http_request`) |
 | `stt` | `plugins/stt/` | `network` (cloud provider) | speech-to-text — local ONNX (sherpa: zipformer/whisper) in-process + openai audio via `network`, declares `network` (caller of gated `http_request`) |
+| `secrets` | `plugins/secrets/` | — | encrypted credential/API-key vault (`secret_get`/`secret_set`/`secret_delete`/`secret_list`), ChaCha20-Poly1305 per-caller `.vault` files, master key via `SECRETS_PLUGIN_MASTER_KEY`, `PERMISSION_SECRETS` (proto v1.4) |
 
 ## Planned
 
@@ -22,7 +23,6 @@ Dependency order — each row can start once everything in "depends on" ships.
 
 | Plugin | Purpose | Depends on | Permissions |
 |---|---|---|---|
-| `secrets` | encrypted credential/API-key vault (`secret_get`/`secret_set`) | — | `PERMISSION_SECRETS` (defined, proto v1.4) |
 | `filesystem` | sandboxed file read/write + read-only browse (`ls`/`cat` equivalents: `fs_list`/`fs_read`) — no exec, no shell | — | `PERMISSION_FILES_READ`/`PERMISSION_FILES_WRITE` (existing) |
 | `scheduler` | fire an action/event once after a delay, or repeatedly on a cron expr | `database` (persist schedule state across restarts) | `PERMISSION_SCHEDULER` (existing) |
 | `vector-db` | embedding upsert/similarity search (`vec_upsert`/`vec_query`) | — | own storage backend, standalone |
@@ -55,9 +55,10 @@ itself: T-19 requires the *caller* of a gated action to hold its permission,
 and the per-action `permission` in `network`'s manifest makes that check
 data-driven ("any caller without the permission is denied").
 
-`secrets` should ship early — `network`/`ai` need somewhere to keep API
-keys/tokens that isn't plaintext config. Any plugin holding a credential
-today should migrate to it once it exists.
+`secrets` shipped (0.1.0) — `network`/`ai`/`tts`/`stt` still keep provider API
+keys in plaintext config env vars; the near-term item is migrating them onto
+the vault (see `plugins/secrets/ROADMAP.md`), keeping the env-var name as the
+lookup handle so the per-caller permission story stays intact.
 
 `agent` ships last: it's the integration point for everything else, so it's
 the plugin most likely to change shape once the others exist and their real
