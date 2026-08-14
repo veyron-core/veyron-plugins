@@ -1,3 +1,4 @@
 target/
 plugins/network/KERNEL_PROTOCOL_TODO.md
 models/
+.omo/
