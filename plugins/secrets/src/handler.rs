@@ -191,7 +191,11 @@ mod tests {
     async fn set_get_delete_roundtrip() {
         let (h, _d) = test_handler();
         let out = h
-            .handle("caller-a", "secret_set", br#"{"name":"api_key","value":"sk-x"}"#)
+            .handle(
+                "caller-a",
+                "secret_set",
+                br#"{"name":"api_key","value":"sk-x"}"#,
+            )
             .await
             .unwrap();
         assert_eq!(out, br#"{"stored":true}"#);
@@ -279,15 +283,9 @@ mod tests {
     #[tokio::test]
     async fn rejects_bad_caller_id() {
         let (h, _d) = test_handler();
-        let out = h
-            .handle("", "secret_list", b"")
-            .await
-            .unwrap_err();
+        let out = h.handle("", "secret_list", b"").await.unwrap_err();
         assert!(out.contains("missing caller_plugin_id"));
-        let out = h
-            .handle("../evil", "secret_list", b"")
-            .await
-            .unwrap_err();
+        let out = h.handle("../evil", "secret_list", b"").await.unwrap_err();
         assert!(out.contains("invalid caller_plugin_id"));
     }
 

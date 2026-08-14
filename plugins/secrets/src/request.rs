@@ -45,8 +45,8 @@ pub fn valid_name(name: &str, max_name_bytes: usize) -> Result<(), String> {
 }
 
 pub fn parse_set_params(json: &[u8], max_value_bytes: usize) -> Result<SetParams, String> {
-    let params: SetParams = serde_json::from_slice(json)
-        .map_err(|e| format!("invalid params: {e}"))?;
+    let params: SetParams =
+        serde_json::from_slice(json).map_err(|e| format!("invalid params: {e}"))?;
     if params.value.len() > max_value_bytes {
         return Err(format!(
             "secret value too large: {} bytes (max {max_value_bytes})",

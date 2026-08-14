@@ -53,14 +53,16 @@ impl ConcurrentHandler for handler::Handler {
 /// Build the plugin handler from environment configuration. Panics on
 /// missing/invalid required config (same convention as `database`).
 pub fn handler_from_env() -> Arc<handler::Handler> {
-    let data_dir = std::env::var("SECRETS_PLUGIN_DATA_DIR")
-        .unwrap_or_else(|_| panic!("SECRETS_PLUGIN_DATA_DIR must be set (see config.example.yaml's data_dir)"));
+    let data_dir = std::env::var("SECRETS_PLUGIN_DATA_DIR").unwrap_or_else(|_| {
+        panic!("SECRETS_PLUGIN_DATA_DIR must be set (see config.example.yaml's data_dir)")
+    });
 
-    let master_key_raw = std::env::var("SECRETS_PLUGIN_MASTER_KEY")
-        .unwrap_or_else(|_| panic!(
+    let master_key_raw = std::env::var("SECRETS_PLUGIN_MASTER_KEY").unwrap_or_else(|_| {
+        panic!(
             "SECRETS_PLUGIN_MASTER_KEY must be set: 32 bytes as 64 hex chars or 44 base64 chars \
              (generate with: openssl rand -hex 32)"
-        ));
+        )
+    });
     let master_key = vault::parse_master_key(&master_key_raw)
         .unwrap_or_else(|e| panic!("SECRETS_PLUGIN_MASTER_KEY invalid: {e}"));
 

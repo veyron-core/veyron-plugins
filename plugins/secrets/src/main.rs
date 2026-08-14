@@ -26,10 +26,10 @@ mod tests {
     use secrets_plugin::handler::Handler;
     use secrets_plugin::request;
     use std::sync::Arc;
+    use tokio::net::UnixStream;
     use veyron_sdk::concurrent::run_concurrent_loop;
     use veyron_sdk::proto::{envelope, ActionRequest, ActionStatus, Envelope, PluginShutdown};
     use veyron_sdk::VeyronClient;
-    use tokio::net::UnixStream;
 
     fn test_handler() -> Arc<Handler> {
         let dir = tempfile::tempdir().unwrap();
@@ -78,22 +78,28 @@ mod tests {
         // answer every one (deadlock/ordering regression).
         const N: usize = 20;
         for i in 0..N {
-            let params = serde_json::json!({ "name": format!("key{i}"), "value": format!("val{i}") });
+            let params =
+                serde_json::json!({ "name": format!("key{i}"), "value": format!("val{i}") });
             kernel
-                .send("secrets", action_req(&format!("set-{i}"), "secret_set", &serde_json::to_vec(&params).unwrap(), "test-caller"))
+                .send(
+                    "secrets",
+                    action_req(
+                        &format!("set-{i}"),
+                        "secret_set",
+                        &serde_json::to_vec(&params).unwrap(),
+                        "test-caller",
+                    ),
+                )
                 .await
                 .unwrap();
         }
 
         let mut ok = 0usize;
         for _ in 0..N {
-            let env = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                kernel.recv(),
-            )
-            .await
-            .expect("timed out waiting for response — loop likely deadlocked")
-            .unwrap();
+            let env = tokio::time::timeout(std::time::Duration::from_secs(5), kernel.recv())
+                .await
+                .expect("timed out waiting for response — loop likely deadlocked")
+                .unwrap();
             match env.payload {
                 Some(envelope::Payload::ActionResponse(resp)) => {
                     assert_eq!(resp.status, ActionStatus::ActionOk as i32);
@@ -128,17 +134,18 @@ mod tests {
             .await
             .unwrap();
 
-        let env = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            kernel.recv(),
-        )
-        .await
-        .expect("timed out waiting for error response")
-        .unwrap();
+        let env = tokio::time::timeout(std::time::Duration::from_secs(5), kernel.recv())
+            .await
+            .expect("timed out waiting for error response")
+            .unwrap();
         match env.payload {
             Some(envelope::Payload::ActionResponse(resp)) => {
                 assert_eq!(resp.status, ActionStatus::ActionError as i32);
-                assert!(resp.error.contains("missing caller_plugin_id"), "error was: {:?}", resp.error);
+                assert!(
+                    resp.error.contains("missing caller_plugin_id"),
+                    "error was: {:?}",
+                    resp.error
+                );
             }
             other => panic!("unexpected payload: {other:?}"),
         }

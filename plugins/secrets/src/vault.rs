@@ -89,12 +89,11 @@ impl Vault {
 
 /// Encrypt a secrets map into the on-disk vault encoding.
 fn encrypt(secrets: &HashMap<String, String>, key: &[u8; 32]) -> VaultResult<Vec<u8>> {
-    let payload = serde_json::to_vec(secrets)
-        .map_err(|e| format!("failed to serialize vault: {e}"))?;
+    let payload =
+        serde_json::to_vec(secrets).map_err(|e| format!("failed to serialize vault: {e}"))?;
 
     let mut nonce_bytes = [0u8; NONCE_LEN];
-    getrandom::getrandom(&mut nonce_bytes)
-        .map_err(|e| format!("failed to generate nonce: {e}"))?;
+    getrandom::getrandom(&mut nonce_bytes).map_err(|e| format!("failed to generate nonce: {e}"))?;
 
     let cipher = ChaCha20Poly1305::new(Key::from_slice(key));
     let ciphertext = cipher
@@ -118,10 +117,7 @@ fn decrypt(raw: &[u8], key: &[u8; 32]) -> VaultResult<HashMap<String, String>> {
         return Err("vault file has invalid magic".to_string());
     }
     if raw[MAGIC.len()] != VERSION {
-        return Err(format!(
-            "unsupported vault version {}",
-            raw[MAGIC.len()]
-        ));
+        return Err(format!("unsupported vault version {}", raw[MAGIC.len()]));
     }
 
     let nonce = &raw[MAGIC.len() + 1..HEADER_LEN];
@@ -157,8 +153,13 @@ fn atomic_write(path: &Path, raw: &[u8]) -> VaultResult<()> {
         f.sync_all()
             .map_err(|e| format!("failed to fsync {}: {e}", tmp_path.display()))?;
     }
-    fs::rename(&tmp_path, path)
-        .map_err(|e| format!("failed to rename {} -> {}: {e}", tmp_path.display(), path.display()))?;
+    fs::rename(&tmp_path, path).map_err(|e| {
+        format!(
+            "failed to rename {} -> {}: {e}",
+            tmp_path.display(),
+            path.display()
+        )
+    })?;
 
     if let Ok(d) = File::open(dir) {
         let _ = d.sync_all();
@@ -186,7 +187,10 @@ pub fn parse_master_key(raw: &str) -> VaultResult<[u8; 32]> {
 
     let mut key = [0u8; 32];
     if bytes.len() != 32 {
-        return Err(format!("master key decodes to {} bytes, expected 32", bytes.len()));
+        return Err(format!(
+            "master key decodes to {} bytes, expected 32",
+            bytes.len()
+        ));
     }
     key.copy_from_slice(&bytes);
     Ok(key)
@@ -313,7 +317,10 @@ mod tests {
 
         let v2 = Vault::load_or_create(path.clone(), &test_key()).unwrap();
         assert_eq!(v2.get("k"), Some("v"));
-        assert!(!dir.path().join("caller.vault.tmp").exists(), "tmp file cleaned up");
+        assert!(
+            !dir.path().join("caller.vault.tmp").exists(),
+            "tmp file cleaned up"
+        );
     }
 
     #[test]
