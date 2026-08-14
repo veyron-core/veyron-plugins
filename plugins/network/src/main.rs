@@ -5,28 +5,31 @@
 //! v1 is HTTP only. Needs real network egress: run with `sandbox: false`
 //! in the kernel's `config.yaml` (see README.md).
 //!
-//! Concurrency: like `database`, this hand-rolls a concurrent loop instead
-//! of the SDK's sequential `serve()` (root ROADMAP.md, "hot-path plugins").
-//! One task owns the `VeyronClient` exclusively and `tokio::select!`s
-//! between `client.recv()` (inbound frames) and an `mpsc::Receiver` that
-//! spawned handler tasks push completed responses into — see `run_loop` for
-//! why this can't deadlock. Each `http_request` runs in its own task, so
-//! multiple requests from one caller (and many callers) make progress in
-//! parallel, and a per-caller in-flight cap
+//! Concurrency: like `database`, this drives the SDK's concurrent message
+//! loop ([`ConcurrentHandler`] + [`serve_concurrent`]) instead of the
+//! sequential `Plugin::serve` (root ROADMAP.md, "hot-path plugins"). The
+//! SDK loop spawns a handler task per inbound `ActionRequest` and funnels
+//! completed replies back through an mpsc channel to the single task that
+//! owns the client. Each `http_request` runs in its own task, so multiple
+//! requests from one caller (and many callers) make progress in parallel,
+//! and a per-caller in-flight cap
 //! (`NETWORK_PLUGIN_MAX_INFLIGHT_PER_CALLER`) keeps one noisy caller from
-//! monopolizing `network`'s outbound connections. Out-of-order replies are
-//! fine — the kernel matches on `action_id`.
+//! monopolizing `network`'s outbound connections. The cap is enforced in
+//! two places: [`ConcurrentHandler::accept`] (the loop's pre-spawn gate —
+//! rejects without spawning a task) and the RAII slot guard in
+//! [`ConcurrentHandler::on_action`] (the authoritative reservation, freed
+//! even when the handler panics). Out-of-order replies are fine — the
+//! kernel matches on `action_id`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use network_plugin::{handler, request};
-use tokio::sync::mpsc;
+use veyron_sdk::concurrent::{response_envelope, serve_concurrent};
 use veyron_sdk::proto::{
-    envelope, ActionResponse, ActionStatus, Envelope, EventPublish, EventPublishStatus,
-    PluginManifest, Pong,
+    envelope, ActionRequest, Envelope, EventPublish, EventPublishStatus, PluginManifest,
 };
-use veyron_sdk::{VeyronClient, VeyronError};
+use veyron_sdk::{ConcurrentHandler, VeyronClient, VeyronError};
 
 /// Operator-only opt-in proxy for all outbound requests. Deliberately not a
 /// per-request param: a caller-controlled proxy would let any action bypass
@@ -111,6 +114,8 @@ struct NetworkPlugin {
     /// it's only ever invoked for hostnames needing DNS resolution.
     extra_blocklist: network_plugin::ssrf::Blocklist,
     allowlist: network_plugin::ssrf::Allowlist,
+    /// Per-caller in-flight cap for the `http_request` concurrency gate.
+    inflight: Inflight,
 }
 
 impl NetworkPlugin {
@@ -118,6 +123,10 @@ impl NetworkPlugin {
         let extra_blocklist = network_plugin::ssrf::Blocklist::from_env();
         let allowlist = network_plugin::ssrf::Allowlist::from_env();
         let config = ClientConfig::from_env();
+        let max_inflight_per_caller = std::env::var(MAX_INFLIGHT_PER_CALLER_ENV)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_MAX_INFLIGHT_PER_CALLER);
         Self {
             client: Self::build_client(
                 reqwest::redirect::Policy::none(),
@@ -137,6 +146,7 @@ impl NetworkPlugin {
                 .collect(),
             extra_blocklist,
             allowlist,
+            inflight: Inflight::new(max_inflight_per_caller),
         }
     }
 
@@ -361,6 +371,21 @@ struct Inflight {
     active: Mutex<HashMap<String, usize>>,
 }
 
+/// RAII slot guard: frees the caller's in-flight slot on drop. Created by
+/// [`Inflight::acquire`]; dropping it (including during unwinding from a
+/// panicking handler) is what makes the cap panic-safe — the slot can
+/// never leak.
+struct InflightSlot<'a> {
+    inflight: &'a Inflight,
+    caller: String,
+}
+
+impl Drop for InflightSlot<'_> {
+    fn drop(&mut self) {
+        self.inflight.release(&self.caller);
+    }
+}
+
 impl Inflight {
     fn new(limit: usize) -> Self {
         Self {
@@ -369,22 +394,40 @@ impl Inflight {
         }
     }
 
-    /// Reserve a slot for `caller`, rejecting the request when it already
-    /// has `limit` requests in flight.
-    fn try_acquire(&self, caller: &str) -> Result<(), String> {
+    /// Pre-spawn gate, run in the loop task via
+    /// [`ConcurrentHandler::accept`]: rejects a caller already at the cap
+    /// *without* reserving a slot. The authoritative reservation happens in
+    /// the spawned handler task ([`Inflight::acquire`]), which re-checks —
+    /// a slot may have been taken between this check and the acquisition.
+    fn check(&self, caller: &str) -> Result<(), String> {
         if self.limit == 0 {
             return Ok(());
         }
-        let mut active = self.active.lock().unwrap();
-        let in_flight = active.entry(caller.to_string()).or_insert(0);
-        if *in_flight >= self.limit {
-            return Err(format!(
-                "caller {caller} already has {in_flight} requests in flight (limit {})",
-                self.limit
-            ));
+        let active = self.active.lock().unwrap();
+        if let Some(in_flight) = active.get(caller) {
+            if *in_flight >= self.limit {
+                return Err(format!(
+                    "caller {caller} already has {in_flight} requests in flight (limit {})",
+                    self.limit
+                ));
+            }
         }
-        *in_flight += 1;
         Ok(())
+    }
+
+    /// Reserve a slot for `caller`, returning a guard that frees it on drop.
+    /// Rejects (without reserving) when the caller is already at the cap —
+    /// this is the authoritative gate inside the handler task.
+    fn acquire(&self, caller: &str) -> Result<InflightSlot<'_>, String> {
+        self.check(caller)?;
+        if self.limit > 0 {
+            let mut active = self.active.lock().unwrap();
+            *active.entry(caller.to_string()).or_insert(0) += 1;
+        }
+        Ok(InflightSlot {
+            inflight: self,
+            caller: caller.to_string(),
+        })
     }
 
     /// Free the slot a completed (or failed) request held for `caller`.
@@ -402,187 +445,72 @@ impl Inflight {
     }
 }
 
-/// Build the response envelope for a completed (or failed) action.
-fn response_envelope(action_id: String, result: Result<Vec<u8>, String>) -> Envelope {
-    let response = match result {
-        Ok(data_json) => ActionResponse {
-            action_id,
-            status: ActionStatus::ActionOk as i32,
-            data_json,
-            error: String::new(),
-        },
-        Err(error) => ActionResponse {
-            action_id,
-            status: ActionStatus::ActionError as i32,
-            data_json: Vec::new(),
-            error,
-        },
-    };
-    Envelope {
-        payload: Some(envelope::Payload::ActionResponse(response)),
-        ..Default::default()
+impl ConcurrentHandler for NetworkPlugin {
+    fn id(&self) -> &str {
+        "network"
     }
-}
 
-/// Spawn a handler task for `req` that always produces exactly one response
-/// envelope on `tx`, even if `handle_http_request` panics.
-///
-/// This double-spawns: the inner `tokio::spawn` runs the actual handler and
-/// its `JoinHandle` is awaited by the outer task. A panic inside the inner
-/// task is caught by Tokio and surfaced as `Err(JoinError)` to the outer
-/// task rather than unwinding it, so the outer task can always reach the
-/// `inflight.release(...)` and `tx.send(...)` at the end — a panicking
-/// handler becomes an `ACTION_ERROR` response (and a freed cap slot)
-/// instead of a silently dropped reply.
-fn spawn_handler(
-    plugin: Arc<NetworkPlugin>,
-    inflight: Arc<Inflight>,
-    tx: mpsc::Sender<Envelope>,
-    action_id: String,
-    caller_plugin_id: String,
-    params_json: Vec<u8>,
-) {
-    tokio::spawn(async move {
-        let inner_plugin = plugin.clone();
-        let join = tokio::spawn(async move { inner_plugin.handle_http_request(&params_json).await });
-        let outcome = match join.await {
-            Ok(outcome) => outcome,
-            Err(join_err) => HttpOutcome {
-                response: Err(format!("handler panicked: {join_err}")),
-                status: 0,
-                host: String::new(),
-                latency_ms: 0,
-                retry_count: 0,
-            },
+    fn version(&self) -> &str {
+        "0.4.0"
+    }
+
+    fn manifest(&self) -> PluginManifest {
+        manifest()
+    }
+
+    fn accept(&self, req: &ActionRequest) -> Result<(), String> {
+        self.inflight.check(&req.caller_plugin_id)
+    }
+
+    async fn on_action(&self, req: ActionRequest) -> Vec<Envelope> {
+        if req.action != "http_request" {
+            return vec![response_envelope(
+                req.action_id,
+                Err(format!("unknown action: {}", req.action)),
+            )];
+        }
+        // Authoritative cap reservation. `accept` already rejected the
+        // obviously-over-cap calls in the loop task, but the slot may
+        // have been taken by another request since; re-check here. The
+        // guard frees the slot when dropped — including when the
+        // handler panics (the SDK loop turns that into an ACTION_ERROR).
+        let _slot = match self.inflight.acquire(&req.caller_plugin_id) {
+            Ok(slot) => slot,
+            Err(error) => {
+                return vec![response_envelope(req.action_id, Err(error))];
+            }
         };
-        inflight.release(&caller_plugin_id);
+        let outcome = self.handle_http_request(&req.params_json).await;
         let event = event_envelope(&outcome);
-        let envelope = response_envelope(action_id, outcome.response);
-        // Receiver side only goes away when the main loop exits, at which
-        // point dropping the reply is the correct behavior anyway.
-        let _ = tx.send(envelope).await;
-        // Best-effort, sent only after the response so the reply never waits on observability.
-        let _ = tx.send(event).await;
-    });
-}
+        let envelope = response_envelope(req.action_id, outcome.response);
+        // Best-effort, sent only after the response so the reply never
+        // waits on observability.
+        vec![envelope, event]
+    }
 
-fn unix_millis() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
-/// Drive the plugin's message loop to completion (disconnect, EOF, or an
-/// explicit `PluginShutdown`).
-///
-/// `client` is owned exclusively by this function — never shared behind a
-/// lock. Each loop iteration is a single `tokio::select!` between two
-/// futures: `client.recv()` (the next inbound frame) and `rx.recv()` (the
-/// next completed response envelope from a spawned handler). Because
-/// `client` is never wrapped in a `Mutex`, a handler that finishes while
-/// this function is parked inside `client.recv().await` does not need to
-/// acquire anything the loop task holds: it just calls `tx.send(...)`,
-/// which wakes the `select!` to pick the envelope up and `client.send(...)`
-/// it on the next iteration — no task ever waits on a resource held by a
-/// task waiting on it. See the module docs in `database`'s main.rs for the
-/// full deadlock analysis this design replaced.
-async fn run_loop(
-    mut client: VeyronClient,
-    plugin: Arc<NetworkPlugin>,
-    inflight: Arc<Inflight>,
-) -> Result<(), VeyronError> {
-    let (tx, mut rx) = mpsc::channel::<Envelope>(256);
-
-    loop {
-        tokio::select! {
-            envelope = client.recv() => {
-                let envelope = match envelope {
-                    Ok(env) => env,
-                    Err(_) => break, // disconnect / EOF
-                };
-
-                match envelope.payload {
-                    Some(envelope::Payload::Ping(ping)) => {
-                        let pong = Envelope {
-                            payload: Some(envelope::Payload::Pong(Pong {
-                                original_timestamp: ping.timestamp,
-                                server_timestamp: unix_millis(),
-                            })),
-                            ..Default::default()
-                        };
-                        let _ = client.send("kernel", pong).await;
-                    }
-                    Some(envelope::Payload::PluginShutdown(_)) => break,
-                    Some(envelope::Payload::EventPublishAck(ack)) => {
-                        if ack.status != EventPublishStatus::EventPublishOk as i32 {
-                            println!("[network] event publish failed: {:?}", ack.status);
-                        }
-                    }
-                    Some(envelope::Payload::ActionRequest(req)) if req.action == "http_request" => {
-                        match inflight.try_acquire(&req.caller_plugin_id) {
-                            Ok(()) => {
-                                spawn_handler(
-                                    plugin.clone(),
-                                    inflight.clone(),
-                                    tx.clone(),
-                                    req.action_id,
-                                    req.caller_plugin_id,
-                                    req.params_json,
-                                );
-                            }
-                            Err(error) => {
-                                println!(
-                                    "[network] rejecting http_request from {}: {error}",
-                                    req.caller_plugin_id
-                                );
-                                let envelope = response_envelope(req.action_id, Err(error));
-                                let _ = client.send("kernel", envelope).await;
-                            }
-                        }
-                    }
-                    Some(envelope::Payload::ActionRequest(req)) => {
-                        let envelope = response_envelope(
-                            req.action_id,
-                            Err(format!("unknown action: {}", req.action)),
-                        );
-                        let _ = client.send("kernel", envelope).await;
-                    }
-                    other => {
-                        println!("[network] unhandled message: {other:?}");
-                    }
+    async fn on_message(&self, env: Envelope) -> Result<Option<Envelope>, VeyronError> {
+        match env.payload {
+            Some(envelope::Payload::EventPublishAck(ack)) => {
+                if ack.status != EventPublishStatus::EventPublishOk as i32 {
+                    println!("[network] event publish failed: {:?}", ack.status);
                 }
             }
-            Some(response_envelope) = rx.recv() => {
-                let _ = client.send("kernel", response_envelope).await;
+            other => {
+                println!("[network] unhandled message: {other:?}");
             }
         }
+        Ok(None)
     }
-
-    Ok(())
 }
 
+/// Build the response envelope for a completed (or failed) action.
 #[tokio::main]
 async fn main() -> Result<(), VeyronError> {
     let plugin = Arc::new(NetworkPlugin::new());
-    let max_inflight_per_caller = std::env::var(MAX_INFLIGHT_PER_CALLER_ENV)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_MAX_INFLIGHT_PER_CALLER);
-    let inflight = Arc::new(Inflight::new(max_inflight_per_caller));
 
-    let mut client = VeyronClient::connect_from_env().await?;
+    let client = VeyronClient::connect_from_env().await?;
     let token = std::env::var("VEYRON_JWT_TOKEN").unwrap_or_default();
-    let ack = client.register_full("network", "0.4.0", manifest(), &token).await?;
-    if !ack.accepted {
-        return Err(VeyronError::PermissionDenied(format!(
-            "registration rejected: {}",
-            ack.reject_reason
-        )));
-    }
-    println!("[network] registered with kernel");
-
-    run_loop(client, plugin, inflight).await?;
+    serve_concurrent(client, &token, plugin).await?;
 
     println!("[network] shutting down");
     Ok(())
@@ -593,13 +521,18 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use tokio::net::UnixStream;
-    use veyron_sdk::proto::{ActionRequest, PluginShutdown};
+    use veyron_sdk::concurrent::run_concurrent_loop;
+    use veyron_sdk::proto::{ActionRequest, ActionStatus, PluginShutdown};
     use veyron_sdk::VeyronClient;
 
     /// Plugin whose SSRF policy permits loopback, so tests can hit local
     /// mock servers (the real `NetworkPlugin::new()` reads operator env and
     /// would block 127.0.0.1).
     fn test_plugin() -> Arc<NetworkPlugin> {
+        test_plugin_with_limit(0)
+    }
+
+    fn test_plugin_with_limit(max_inflight_per_caller: usize) -> Arc<NetworkPlugin> {
         let extra_blocklist = network_plugin::ssrf::Blocklist::default();
         let allowlist = network_plugin::ssrf::Allowlist::parse("127.0.0.1");
         let config = ClientConfig {
@@ -628,6 +561,7 @@ mod tests {
             redirect_clients,
             extra_blocklist,
             allowlist,
+            inflight: Inflight::new(max_inflight_per_caller),
         })
     }
 
@@ -672,20 +606,25 @@ mod tests {
     #[tokio::test]
     async fn inflight_cap_tracks_and_releases_per_caller() {
         let inflight = Inflight::new(2);
-        assert!(inflight.try_acquire("a").is_ok());
-        assert!(inflight.try_acquire("a").is_ok());
-        let err = inflight.try_acquire("a").unwrap_err();
+        let slot_a1 = inflight.acquire("a").unwrap();
+        let slot_a2 = inflight.acquire("a").unwrap();
+        let err = match inflight.acquire("a") {
+            Err(e) => e,
+            Ok(_) => panic!("third concurrent slot for caller a should be rejected"),
+        };
         assert!(err.contains("in flight"), "error was: {err}");
         // Different caller is unaffected — the cap is per caller, not global.
-        assert!(inflight.try_acquire("b").is_ok());
+        assert!(inflight.acquire("b").is_ok());
 
-        inflight.release("a");
-        assert!(inflight.try_acquire("a").is_ok());
-        assert!(inflight.try_acquire("a").is_err());
-        // Releasing below zero / unknown callers is a no-op, not a panic.
-        inflight.release("a");
-        inflight.release("a");
-        inflight.release("never_acquired");
+        drop(slot_a1);
+        let slot_a3 = inflight.acquire("a").unwrap();
+        assert!(inflight.acquire("a").is_err());
+        // Dropping a guard frees the slot; over-releasing (unknown or
+        // already-freed callers) is a no-op, not a panic.
+        drop(slot_a2);
+        drop(slot_a3);
+        assert!(inflight.acquire("a").is_ok());
+        assert!(inflight.acquire("never_acquired").is_ok());
     }
 
     /// Regression test for the deadlock shape that motivated the concurrent
@@ -698,14 +637,13 @@ mod tests {
     #[tokio::test]
     async fn concurrent_requests_get_responses_without_deadlocking() {
         let plugin = test_plugin();
-        let inflight = Arc::new(Inflight::new(0)); // unlimited — nothing to reject
         let url = mock_server_responding("HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\nhello").await;
 
         let (plugin_side, kernel_side) = UnixStream::pair().unwrap();
         let client = VeyronClient::from_stream(plugin_side, None);
         let mut kernel = VeyronClient::from_stream(kernel_side, None);
 
-        let loop_task = tokio::spawn(run_loop(client, plugin, inflight));
+        let loop_task = tokio::spawn(run_concurrent_loop(client, plugin));
 
         const N: usize = 20;
         for i in 0..N {
@@ -754,7 +692,7 @@ mod tests {
         kernel.send("network", shutdown).await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), loop_task)
             .await
-            .expect("run_loop did not exit after PluginShutdown")
+            .expect("run_concurrent_loop did not exit after PluginShutdown")
             .unwrap()
             .unwrap();
     }
@@ -765,8 +703,7 @@ mod tests {
     /// the slot frees up again.
     #[tokio::test]
     async fn per_caller_cap_rejects_over_limit_requests() {
-        let plugin = test_plugin();
-        let inflight = Arc::new(Inflight::new(2));
+        let plugin = test_plugin_with_limit(2);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -789,7 +726,7 @@ mod tests {
         let (plugin_side, kernel_side) = UnixStream::pair().unwrap();
         let client = VeyronClient::from_stream(plugin_side, None);
         let mut kernel = VeyronClient::from_stream(kernel_side, None);
-        let loop_task = tokio::spawn(run_loop(client, plugin, inflight));
+        let loop_task = tokio::spawn(run_concurrent_loop(client, plugin));
 
         for i in 0..5 {
             let params = serde_json::json!({"method": "GET", "url": url}).to_string();
@@ -852,7 +789,7 @@ mod tests {
         kernel.send("network", shutdown).await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), loop_task)
             .await
-            .expect("run_loop did not exit after PluginShutdown")
+            .expect("run_concurrent_loop did not exit after PluginShutdown")
             .unwrap()
             .unwrap();
     }
@@ -905,13 +842,12 @@ mod tests {
     #[tokio::test]
     async fn request_completed_event_reports_retry_count_on_success() {
         let plugin = test_plugin();
-        let inflight = Arc::new(Inflight::new(0));
         let url = mock_server_responding("HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\nhello").await;
 
         let (plugin_side, kernel_side) = UnixStream::pair().unwrap();
         let client = VeyronClient::from_stream(plugin_side, None);
         let mut kernel = VeyronClient::from_stream(kernel_side, None);
-        let loop_task = tokio::spawn(run_loop(client, plugin, inflight));
+        let loop_task = tokio::spawn(run_concurrent_loop(client, plugin));
 
         let params = serde_json::json!({"method": "GET", "url": url}).to_string();
         kernel
@@ -959,7 +895,7 @@ mod tests {
         kernel.send("network", shutdown).await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), loop_task)
             .await
-            .expect("run_loop did not exit after PluginShutdown")
+            .expect("run_concurrent_loop did not exit after PluginShutdown")
             .unwrap()
             .unwrap();
     }
@@ -973,7 +909,6 @@ mod tests {
     #[tokio::test]
     async fn request_completed_event_reports_retry_count_on_failure() {
         let plugin = test_plugin();
-        let inflight = Arc::new(Inflight::new(0));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -994,7 +929,7 @@ mod tests {
         let (plugin_side, kernel_side) = UnixStream::pair().unwrap();
         let client = VeyronClient::from_stream(plugin_side, None);
         let mut kernel = VeyronClient::from_stream(kernel_side, None);
-        let loop_task = tokio::spawn(run_loop(client, plugin, inflight));
+        let loop_task = tokio::spawn(run_concurrent_loop(client, plugin));
 
         let params = serde_json::json!({
             "method": "GET",
@@ -1047,7 +982,7 @@ mod tests {
         kernel.send("network", shutdown).await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), loop_task)
             .await
-            .expect("run_loop did not exit after PluginShutdown")
+            .expect("run_concurrent_loop did not exit after PluginShutdown")
             .unwrap()
             .unwrap();
     }
