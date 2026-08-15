@@ -1,0 +1,7 @@
+# sync-client plugin config. Copy to config.yaml (the kernel's plugin
+# supervisor reads the `env:` list and exports these before spawning), or set
+# the equivalent env vars directly. All three are optional.
+
+heartbeat_secs: 30          # heartbeat interval (s); 0 disables — env SYNC_CLIENT_HEARTBEAT_SECS
+device_id: local            # heartbeat key suffix — env SYNC_CLIENT_DEVICE_ID (defaults to $HOSTNAME)
+snapshot_timeout_ms: 5000   # snapshot pull timeout (ms) — env SYNC_CLIENT_SNAPSHOT_TIMEOUT_MS
