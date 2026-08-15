@@ -17,6 +17,8 @@ file is the cross-plugin picture only.
 | `stt` | `plugins/stt/` | `network` (cloud provider) | speech-to-text — local ONNX (sherpa: zipformer/whisper) in-process + openai audio via `network`, declares `network` (caller of gated `http_request`). **D-12:** `stt_listen_start`/`stt_listen_stop` stream PCM in and publish a `stt_text` event (`PERMISSION_AUDIO_STREAM`, `PERMISSION_EVENT_PUBLISH`) |
 | `secrets` | `plugins/secrets/` | — | encrypted credential/API-key vault (`secret_get`/`secret_set`/`secret_delete`/`secret_list`), ChaCha20-Poly1305 per-caller `.vault` files, master key via `SECRETS_PLUGIN_MASTER_KEY`, `PERMISSION_SECRETS` (proto v1.4) |
 | `gated-write` | `plugins/gated-write/` | — | reference impl of the D-09 confirmation gate: risky file write split into `request_write` (any caller, `requires_confirmation`) + `confirm_write` (allowlisted callers only), writes confined to a data dir |
+| `sync` | `plugins/sync/` | — | host-side sync state primitive (D-13): versioned SQLite KV + `sync_get_snapshot`/`sync_get`/`sync_set`/`sync_del`, publishes `sync.delta` events on every mutation (`PERMISSION_STORAGE`, `PERMISSION_EVENT_PUBLISH`) |
+| `sync-client` | `plugins/sync-client/` | `sync` | client-side mirror + heartbeat scheduler (D-13): subscribes to `sync.delta`, pulls `sync_get_snapshot` on (re)connect to catch up, pushes its heartbeat into host state via `sync_set` on a timer (`PERMISSION_SCHEDULER`, `PERMISSION_IPC_SEND`) |
 
 ## Planned
 
