@@ -863,7 +863,8 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "veyron-sdk"
 version = "0.1.6"
-source = "git+https://github.com/veyron-core/veyron-sdk-rust?branch=feat%2Fd-09-confirmation-gate#b007bfa965ddec767438278171472de7f1d79c43"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6de4276c427c11f6cc5f550cf3d5b61cf5e844a8ff55f722cdb61c468d65efb"
 dependencies = [
  "crc32fast",
  "futures-util",

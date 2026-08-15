@@ -20,9 +20,3 @@ serde_json = "1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
-
-# The confirmation gate landed in veyron-sdk 0.1.6 — until it's published to
-# crates.io, resolve the SDK from the D-09 branch. Drop this section (and the
-# sdk pin) once 0.1.6 is on crates.io.
-[patch.crates-io]
-veyron-sdk = { git = "https://github.com/veyron-core/veyron-sdk-rust", branch = "feat/d-09-confirmation-gate" }
