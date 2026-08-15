@@ -145,10 +145,7 @@ fn kokoro_lexicon(dir: &Path) -> String {
         .map(|rd| {
             rd.flatten()
                 .filter(|e| {
-                    e.file_name()
-                        .to_string_lossy()
-                        .starts_with("lexicon-")
-                        && e.path().is_file()
+                    e.file_name().to_string_lossy().starts_with("lexicon-") && e.path().is_file()
                 })
                 .map(|e| e.path().to_string_lossy().into_owned())
                 .collect()
@@ -169,7 +166,9 @@ fn build_kokoro_config(dir: &Path, num_threads: i32) -> Result<OfflineTtsConfig,
                 data_dir: Some(require_path(dir, "espeak-ng-data")?),
                 // Optional assets: only set when present, so an English-only
                 // install works with the four files above alone.
-                dict_dir: dict_dir.is_dir().then(|| dict_dir.to_string_lossy().into_owned()),
+                dict_dir: dict_dir
+                    .is_dir()
+                    .then(|| dict_dir.to_string_lossy().into_owned()),
                 lexicon: {
                     let l = kokoro_lexicon(dir);
                     (!l.is_empty()).then_some(l)
@@ -233,35 +232,19 @@ fn resolve_sid(model_type: &str, voice: &str, num_speakers: i32) -> Result<i32, 
 /// Synthesize `params.text` with the local engine. CPU-bound and blocking;
 /// callers (the serve loop) run one request at a time, so this is fine.
 pub fn synthesize(params: &SynthesizeParams) -> Result<AudioResult, String> {
-    let loaded = engine()?;
-    let num_speakers = loaded.tts.num_speakers();
-    let sid = resolve_sid(&loaded.model_type, &params.voice, num_speakers)?;
-
-    let gen = GenerationConfig {
-        sid,
-        speed: params.speed,
-        ..Default::default()
-    };
-    let audio = loaded
-        .tts
-        .generate_with_config(
-            params.text.as_str(),
-            &gen,
-            None::<fn(&[f32], f32) -> bool>,
-        )
-        .ok_or_else(|| "synthesis failed: sherpa-onnx returned no audio".to_string())?;
-
-    let samples = audio.samples();
-    let sample_rate = audio.sample_rate().max(1) as u32;
+    let (samples, sample_rate) = synthesize_samples(&params.text, &params.voice, params.speed)?;
     // sherpa-onnx TTS output is always mono.
     let channels: u16 = 1;
     let duration_seconds = samples.len() as f32 / (sample_rate * channels as u32) as f32;
 
     let (bytes, format) = match params.format {
-        AudioFormat::Wav => (f32_to_wav(samples, sample_rate, channels), "wav".to_string()),
+        AudioFormat::Wav => (
+            f32_to_wav(&samples, sample_rate, channels),
+            "wav".to_string(),
+        ),
         AudioFormat::Pcm => {
             let mut raw = Vec::with_capacity(samples.len() * 2);
-            for &s in samples {
+            for &s in &samples {
                 let v = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
                 raw.extend_from_slice(&v.to_le_bytes());
             }
@@ -277,6 +260,28 @@ pub fn synthesize(params: &SynthesizeParams) -> Result<AudioResult, String> {
         duration_seconds,
         audio_base64: encode_base64(&bytes),
     })
+}
+
+/// Synthesize to raw mono `f32` samples plus the model's sample rate —
+/// the building block both [`synthesize`] (wav/pcm packaging) and the
+/// `tts_speak` streaming path (Opus encode) share.
+pub fn synthesize_samples(text: &str, voice: &str, speed: f32) -> Result<(Vec<f32>, u32), String> {
+    let loaded = engine()?;
+    let num_speakers = loaded.tts.num_speakers();
+    let sid = resolve_sid(&loaded.model_type, voice, num_speakers)?;
+
+    let gen = GenerationConfig {
+        sid,
+        speed,
+        ..Default::default()
+    };
+    let audio = loaded
+        .tts
+        .generate_with_config(text, &gen, None::<fn(&[f32], f32) -> bool>)
+        .ok_or_else(|| "synthesis failed: sherpa-onnx returned no audio".to_string())?;
+
+    let sample_rate = audio.sample_rate().max(1) as u32;
+    Ok((audio.samples().to_vec(), sample_rate))
 }
 
 /// List the voices the loaded model exposes.
@@ -346,15 +351,16 @@ mod tests {
     #[test]
     fn require_file_reports_missing() {
         let err = require_file(Path::new("/nonexistent-dir"), "model.onnx").unwrap_err();
-        assert!(err.contains("missing required model file"), "error was: {err}");
+        assert!(
+            err.contains("missing required model file"),
+            "error was: {err}"
+        );
     }
 
     #[test]
     fn require_path_accepts_directories() {
-        let dir = std::env::temp_dir().join(format!(
-            "tts-require-path-test-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("tts-require-path-test-{}", std::process::id()));
         let sub = dir.join("espeak-ng-data");
         let _ = std::fs::create_dir_all(&sub);
         let got = require_path(&dir, "espeak-ng-data").unwrap();
@@ -364,10 +370,7 @@ mod tests {
 
     #[test]
     fn kokoro_lexicon_detects_existing_files() {
-        let dir = std::env::temp_dir().join(format!(
-            "tts-lexicon-test-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("tts-lexicon-test-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         std::fs::write(dir.join("lexicon-us-en.txt"), "x").unwrap();
         std::fs::write(dir.join("lexicon-zh.txt"), "x").unwrap();
@@ -382,10 +385,7 @@ mod tests {
 
     #[test]
     fn kokoro_lexicon_empty_when_none() {
-        let dir = std::env::temp_dir().join(format!(
-            "tts-lexicon-empty-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("tts-lexicon-empty-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         std::env::remove_var(ENV_KOKORO_LEXICON);
         assert_eq!(kokoro_lexicon(&dir), "");

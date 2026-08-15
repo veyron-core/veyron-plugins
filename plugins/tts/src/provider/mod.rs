@@ -9,6 +9,7 @@
 
 pub mod elevenlabs;
 pub mod openai;
+pub mod opus;
 pub mod sherpa;
 
 use std::collections::HashMap;
@@ -203,7 +204,10 @@ pub fn kokoro_voice_to_sid(voice: &str) -> Result<i32, String> {
         .map(|(_, sid)| *sid)
         .ok_or_else(|| {
             let names: Vec<&str> = KOKORO_VOICES.iter().map(|(n, _)| *n).collect();
-            format!("unknown kokoro voice '{voice}' (known: {})", names.join(", "))
+            format!(
+                "unknown kokoro voice '{voice}' (known: {})",
+                names.join(", ")
+            )
         })
 }
 

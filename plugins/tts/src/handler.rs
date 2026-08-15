@@ -7,10 +7,15 @@
 //!     send it through `network`'s `http_request` action, parse the audio
 //!     body — same flow as `ai`'s `chat_completion` handler.
 
+use veyron_sdk::proto::{AudioCodec, AudioStreamChunk};
 use veyron_sdk::VeyronClient;
 
-use crate::provider::{elevenlabs::ElevenLabsProvider, openai::OpenAiProvider, AudioResult, Provider, VoiceInfo};
-use crate::request::{self, AudioFormat, Provider as ProviderKind, SynthesizeParams, OPENAI_VOICES};
+use crate::provider::{
+    elevenlabs::ElevenLabsProvider, openai::OpenAiProvider, opus, AudioResult, Provider, VoiceInfo,
+};
+use crate::request::{
+    self, AudioFormat, Provider as ProviderKind, SynthesizeParams, OPENAI_VOICES,
+};
 
 /// `network`'s `http_request` response shape (see
 /// `plugins/network/src/handler.rs::HttpResponseJson`) — only the fields
@@ -57,9 +62,11 @@ pub async fn handle_tts_voices(
             })
             .collect(),
         ProviderKind::ElevenLabs => {
-            return Err("elevenlabs voices are per-account; list them via the ElevenLabs \
+            return Err(
+                "elevenlabs voices are per-account; list them via the ElevenLabs \
                          dashboard or GET /v1/voices with an account key"
-                .to_string())
+                    .to_string(),
+            )
         }
     };
     serde_json::to_vec(&voices).map_err(|e| format!("failed to encode response: {e}"))
@@ -133,11 +140,77 @@ async fn synthesize_cloud(
 
 /// Convenience for tests: normalize a cloud provider's audio body without
 /// a live `network` hop. Not part of the plugin's public interface.
-pub fn parse_cloud_body(provider: ProviderKind, body: &[u8], format: AudioFormat) -> Result<AudioResult, String> {
+pub fn parse_cloud_body(
+    provider: ProviderKind,
+    body: &[u8],
+    format: AudioFormat,
+) -> Result<AudioResult, String> {
     let provider: &dyn Provider = match provider {
         ProviderKind::OpenAi => &OpenAiProvider,
         ProviderKind::ElevenLabs => &ElevenLabsProvider,
         ProviderKind::Sherpa => return Err("sherpa is not a cloud provider".to_string()),
     };
     provider.parse_response(body, format)
+}
+
+/// Handle one `tts_speak` action: synthesize locally (sherpa), encode the
+/// PCM as Opus, and stream it as `AudioStreamChunk`s to the `target` peer
+/// (e.g. a client speaker plugin). Returns a JSON summary of the stream.
+///
+/// The chunk stream is fire-and-forget from the kernel's perspective — the
+/// kernel routes each `AudioStreamChunk` envelope to `target` like any
+/// other message; delivery failure is the caller's to detect (no ack).
+pub async fn handle_tts_speak(
+    client: &mut VeyronClient,
+    params_json: &[u8],
+) -> Result<Vec<u8>, String> {
+    let params = request::parse_speak_request(params_json)?;
+
+    let (samples, model_rate) =
+        crate::provider::sherpa::synthesize_samples(&params.text, &params.voice, params.speed)?;
+    let sample_rate = if params.sample_rate_hz == 0 {
+        model_rate
+    } else {
+        params.sample_rate_hz
+    };
+    let config = opus::OpusConfig {
+        sample_rate_hz: sample_rate,
+        channels: 1,
+        bitrate: params.bitrate,
+    };
+
+    let pcm: Vec<i16> = samples
+        .iter()
+        .map(|&s| (s.clamp(-1.0, 1.0) * 32767.0) as i16)
+        .collect();
+    let packets = opus::encode_pcm(&pcm, &config)?;
+
+    let duration_seconds = samples.len() as f32 / model_rate.max(1) as f32;
+    let total = packets.len();
+    for (idx, packet) in packets.into_iter().enumerate() {
+        let chunk = AudioStreamChunk {
+            stream_id: params.stream_id,
+            codec: AudioCodec::Opus as i32,
+            sample_rate,
+            channels: 1,
+            data: packet,
+            end_of_stream: idx + 1 == total,
+        };
+        client
+            .send_audio_chunk(&params.target, chunk)
+            .await
+            .map_err(|e| format!("failed to stream audio chunk to '{}': {e}", params.target))?;
+    }
+
+    Ok(serde_json::json!({
+        "codec": "opus",
+        "stream_id": params.stream_id,
+        "target": params.target,
+        "sample_rate_hz": sample_rate,
+        "num_channels": 1,
+        "duration_seconds": duration_seconds,
+        "packets": total,
+    })
+    .to_string()
+    .into_bytes())
 }

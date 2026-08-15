@@ -1,7 +1,9 @@
 # stt plugin
 
-Speech-to-text for Veyron plugins. Exposes two actions: `stt_transcribe`
-(turn audio into text) and `stt_models` (list transcribable models).
+Speech-to-text for Veyron plugins. Exposes four actions: `stt_transcribe`
+(turn audio into text), `stt_models` (list transcribable models), and
+`stt_listen_start`/`stt_listen_stop` (stream PCM in, get a transcript out
+as an event — the D-12 voice pipeline's client-STT → host-text leg).
 
 Two providers behind one normalized interface:
 
@@ -14,20 +16,27 @@ The cloud provider routes every request through the `network` plugin's
 `http_request` action, so `network` must also be registered and running
 for it (same model as `ai` and `tts`). `sherpa` opens no sockets — it
 loads an ONNX model from disk and transcribes in-process, so it works
-with nothing but the kernel and the model files.
+with nothing but the kernel and the model files. The listen path
+(`stt_listen_*`) is local-only by design: audio streamed from a mic peer
+never leaves the device; only the transcript is published as an event.
 
 **See [`USAGE.md`](./USAGE.md)** for the caller-facing guide: full
-`stt_transcribe` / `stt_models` request/response reference, per-provider
-examples, every error message a caller can hit, and common patterns.
+`stt_transcribe` / `stt_models` / `stt_listen_start` / `stt_listen_stop`
+request/response reference, per-provider examples, every error message a
+caller can hit, and common patterns.
 
 ## Operator note
 
-`stt` declares one kernel permission — `network` (`plugin.json`:
-`"permissions": ["network"]`) — because its cloud provider invokes the
-`network` plugin's gated `http_request` action, and the kernel's
-anti-laundering check (T-19) requires callers of a gated action to hold
-its permission too (Manifest v2). It opens no sockets itself, so it's safe
-to run with `sandbox: true`. `network` still needs `sandbox: false` (real
+`stt` declares three kernel permissions (`plugin.json`:
+`"permissions": ["network", "PERMISSION_AUDIO_STREAM", "PERMISSION_EVENT_PUBLISH"]`).
+`network` because its cloud provider invokes the `network` plugin's gated
+`http_request` action, and the kernel's anti-laundering check (T-19)
+requires callers of a gated action to hold its permission too (Manifest
+v2). `audio_stream` because the listen path receives `AudioStreamChunk`
+PCM from a mic peer, and `event_publish` because `stt_listen_stop`
+publishes the transcript as an `stt_text` event (both proto v1.6). It
+opens no sockets itself, so it's safe to run with `sandbox: true`.
+`network` still needs `sandbox: false` (real
 egress) for the cloud provider — see `plugins/network/README.md`.
 
 The local provider loads a model into RAM at first use; size `max_vmem_mb`
@@ -108,6 +117,24 @@ Returns the models the provider exposes:
 - `openai` — the known model id list (`whisper-1`, `gpt-4o-transcribe`,
   `gpt-4o-mini-transcribe`).
 
+## Actions: `stt_listen_start` / `stt_listen_stop`
+
+Stream-based transcription for the D-12 voice pipeline: a mic peer sends
+`AudioStreamChunk` envelopes (codec `PCM_S16LE`), and `stt` accumulates,
+then transcribes locally and publishes the text as an `stt_text` event
+(namespaced `plugin.stt.stt_text`). The audio never leaves the device —
+only the transcript does.
+
+```json
+{ "stream_id": 1, "sample_rate_hz": 16000 }
+```
+
+See `USAGE.md` for the full reference. In short: `stt_listen_start` opens
+a per-`stream_id` buffer (rate locked, channels downmixed to mono),
+inbound PCM chunks fill it, and `stt_listen_stop` transcribes with the
+local sherpa model, publishes the transcript event, and returns the text.
+Requires `PERMISSION_AUDIO_STREAM` and `PERMISSION_EVENT_PUBLISH`.
+
 ## Configuration
 
 `stt` reads no config file itself — everything is environment variables
@@ -155,7 +182,8 @@ and cached for the process lifetime.
 
 ## Testing
 
-`cargo test` — 57 unit tests, no live network and no model files required
+`cargo test` — 69 unit tests, no live network and no model files required
 (providers are tested against fixture audio/JSON; sherpa config assembly
-is tested without loading a real model). There's no automated
+is tested without loading a real model; the listen accumulator is tested
+with synthetic PCM chunks). There's no automated
 kernel + `network` + model integration test yet.

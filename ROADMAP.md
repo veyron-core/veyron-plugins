@@ -13,8 +13,8 @@ file is the cross-plugin picture only.
 | `network` | `plugins/network/` | — | outbound HTTP, `PERMISSION_NETWORK`, SSRF-guarded |
 | `ai` | `plugins/ai/` | `network` | LLM chat completion (anthropic/openai-compatible), declares `network` — caller of `network`'s gated `http_request` (T-19) |
 | `database` | `plugins/database/` | — | KV/SQL storage primitive, `PERMISSION_STORAGE`, per-caller SQLite file isolation |
-| `tts` | `plugins/tts/` | `network` (cloud providers) | text-to-speech — local ONNX (sherpa: Kokoro/Piper) in-process + openai/elevenlabs via `network`, declares `network` (caller of gated `http_request`) |
-| `stt` | `plugins/stt/` | `network` (cloud provider) | speech-to-text — local ONNX (sherpa: zipformer/whisper) in-process + openai audio via `network`, declares `network` (caller of gated `http_request`) |
+| `tts` | `plugins/tts/` | `network` (cloud providers) | text-to-speech — local ONNX (sherpa: Kokoro/Piper) in-process + openai/elevenlabs via `network`, declares `network` (caller of gated `http_request`). **D-12:** `tts_speak` streams Opus `AudioStreamChunk`s to a peer (`PERMISSION_AUDIO_STREAM`) |
+| `stt` | `plugins/stt/` | `network` (cloud provider) | speech-to-text — local ONNX (sherpa: zipformer/whisper) in-process + openai audio via `network`, declares `network` (caller of gated `http_request`). **D-12:** `stt_listen_start`/`stt_listen_stop` stream PCM in and publish a `stt_text` event (`PERMISSION_AUDIO_STREAM`, `PERMISSION_EVENT_PUBLISH`) |
 | `secrets` | `plugins/secrets/` | — | encrypted credential/API-key vault (`secret_get`/`secret_set`/`secret_delete`/`secret_list`), ChaCha20-Poly1305 per-caller `.vault` files, master key via `SECRETS_PLUGIN_MASTER_KEY`, `PERMISSION_SECRETS` (proto v1.4) |
 | `gated-write` | `plugins/gated-write/` | — | reference impl of the D-09 confirmation gate: risky file write split into `request_write` (any caller, `requires_confirmation`) + `confirm_write` (allowlisted callers only), writes confined to a data dir |
 

@@ -104,7 +104,9 @@ pub fn parse_wav(bytes: &[u8]) -> Result<(Vec<i16>, u32, u16), String> {
     }
     let audio_format = u16::from_le_bytes(bytes[20..22].try_into().unwrap());
     if audio_format != 1 {
-        return Err(format!("unsupported wav encoding: {audio_format} (expected 1 = PCM)"));
+        return Err(format!(
+            "unsupported wav encoding: {audio_format} (expected 1 = PCM)"
+        ));
     }
     let channels = u16::from_le_bytes(bytes[22..24].try_into().unwrap());
     let sample_rate = u32::from_le_bytes(bytes[24..28].try_into().unwrap());
@@ -124,13 +126,13 @@ pub fn parse_wav(bytes: &[u8]) -> Result<(Vec<i16>, u32, u16), String> {
     let mut data_start = 0usize;
     while offset + 8 <= bytes.len() {
         if &bytes[offset..offset + 4] == b"data" {
-            data_len = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap())
-                as usize;
+            data_len =
+                u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
             data_start = offset + 8;
             break;
         }
-        let chunk_len = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap())
-            as usize;
+        let chunk_len =
+            u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
         offset += 8 + chunk_len + (chunk_len % 2);
     }
     if data_start == 0 {
@@ -272,8 +274,6 @@ fn build_whisper_config(
 /// the serve loop runs one request at a time, so this is fine — same model
 /// as `tts`'s local synthesis.
 pub fn transcribe(params: &TranscribeParams) -> Result<TranscriptResult, String> {
-    let loaded = engine()?;
-
     let samples = decode_samples(
         &params.audio,
         params.format,
@@ -285,9 +285,21 @@ pub fn transcribe(params: &TranscribeParams) -> Result<TranscriptResult, String>
         AudioFormat::Pcm => params.sample_rate_hz,
         _ => return Err("sherpa accepts wav|pcm input only".to_string()),
     };
+    transcribe_pcm(&samples, rate, params.language.as_deref())
+}
+
+/// Transcribe ready-to-go mono `i16` samples (already decoded/downmixed).
+/// Shared by `stt_transcribe` and the streaming listen path, which
+/// accumulates `AudioStreamChunk` PCM into a buffer before transcribing.
+pub fn transcribe_pcm(
+    samples: &[i16],
+    rate: u32,
+    language: Option<&str>,
+) -> Result<TranscriptResult, String> {
+    let loaded = engine()?;
 
     let stream = loaded.recognizer.create_stream();
-    if let Some(lang) = &params.language {
+    if let Some(lang) = language {
         stream.set_option("language", lang);
     }
     let floats: Vec<f32> = samples.iter().map(|&s| s as f32 / 32768.0).collect();
@@ -301,9 +313,8 @@ pub fn transcribe(params: &TranscribeParams) -> Result<TranscriptResult, String>
 
     Ok(TranscriptResult {
         text,
-        language: params
-            .language
-            .clone()
+        language: language
+            .map(str::to_string)
             .unwrap_or_else(|| loaded.language.clone()),
         duration_seconds: samples.len() as f32 / rate.max(1) as f32,
         model: format!("sherpa:{}", loaded.model_type),
@@ -356,7 +367,10 @@ pub mod tests {
     #[test]
     fn require_file_reports_missing() {
         let err = require_file(Path::new("/nonexistent-dir"), "encoder.onnx").unwrap_err();
-        assert!(err.contains("missing required model file"), "error was: {err}");
+        assert!(
+            err.contains("missing required model file"),
+            "error was: {err}"
+        );
     }
 
     #[test]
