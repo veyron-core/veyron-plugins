@@ -130,6 +130,53 @@ objects. Use an `id` as the `model` value in `stt_transcribe` (openai).
 - `openai` — the known ids: `whisper-1`, `gpt-4o-transcribe`,
   `gpt-4o-mini-transcribe`.
 
+## `stt_listen_start` / `stt_listen_stop`
+
+D-12 voice pipeline: the client-STT → host-text leg. A mic-capable peer
+(e.g. the Android device agent's mic capability) streams PCM to `stt` as
+`AudioStreamChunk` envelopes (codec `PCM_S16LE`), and `stt` transcribes
+the accumulated audio locally and publishes the text as an event. The
+audio never leaves the device — only the transcript does.
+
+```json
+{ "stream_id": 1, "sample_rate_hz": 16000, "num_channels": 1 }
+```
+
+- `stt_listen_start` — open an accumulation buffer for a stream. `stream_id`
+  (default `1`) must match the inbound chunks' `stream_id`; `sample_rate_hz`
+  is required and is locked for the stream's lifetime (a mismatched chunk
+  rate is rejected); `num_channels` (default `1`) is downmixed to mono;
+  `language` is an optional ISO-639-1 hint applied at transcription time.
+  Response: `{ "stream_id": 1, "status": "listening" }`.
+
+The mic peer then sends one `AudioStreamChunk` envelope per chunk with
+`codec: PCM_S16LE`, the stream's `sample_rate_hz`/`num_channels`, and the
+16-bit little-endian PCM in `data`. Chunks accumulate until:
+
+```json
+{ "stream_id": 1 }
+```
+
+- `stt_listen_stop` — transcribe the buffered audio with the local sherpa
+  model, publish the result as an event (namespaced
+  `plugin.stt.stt_text`), and return it in the response:
+
+```json
+{
+  "stream_id": 1,
+  "text": "hello from the phone",
+  "language": "en",
+  "duration_seconds": 1.8,
+  "model": "sherpa:transducer"
+}
+```
+
+Subscribers receive the same object as the `stt_text` event payload. A
+stop with no buffered audio errors (`listen stream N has no audio
+buffered`). Requires `PERMISSION_AUDIO_STREAM` (to receive the chunks) and
+`PERMISSION_EVENT_PUBLISH` (to publish the transcript). Local (`sherpa`)
+only — the listen path has no cloud provider.
+
 ## Errors
 
 Any failure returns `ACTION_ERROR` with a human-readable `error` string.
@@ -168,6 +215,14 @@ Callers can hit these:
 | `provider returned HTTP X: <body>` | non-2xx from the provider (e.g. 401 bad key, 400 bad audio) |
 | `malformed openai transcription response: ...` | unexpected body on 2xx |
 | `openai returned an empty transcript` | provider returned blank text |
+| `missing required field: sample_rate_hz` / `sample_rate_hz must be > 0` | `stt_listen_start` without a rate |
+| `num_channels must be > 0` | `stt_listen_start` with bad channel count |
+| `listen stream N is already active` | `stt_listen_start` on a live stream |
+| `no active listen stream N` | chunk/stop for an unknown or finished stream |
+| `stream N rate mismatch: negotiated X Hz, chunk at Y Hz` | chunk rate differs from start |
+| `stream N chunk has odd byte length ...` | non-16-bit-aligned PCM chunk |
+| `listen stream N has no audio buffered` | `stt_listen_stop` on an empty stream |
+| `failed to publish stt_text event: ...` | event bus rejected the publish |
 
 Never logged, never echoed: the resolved API key. Errors only ever
 reference the env var *name* (`api_key_env`).
@@ -184,3 +239,11 @@ reference the env var *name* (`api_key_env`).
   `prompt` with the `openai` provider; Whisper uses it as decoding context.
 - **Local = private**: use `sherpa` for anything sensitive — the audio
   and model run entirely in-process.
+- **Stream mic audio with `stt_listen_*`**: for a device-agent pipeline
+  (D-12/D-14), stream `PCM_S16LE` chunks rather than base64-uploading
+  clips — the audio never leaves the device, and the transcript reaches
+  the host as the `stt_text` event. Subscribe to `plugin.stt.stt_text`
+  on the host to see device speech.
+- **One `stream_id` per mic**: concurrent streams are supported, but each
+  must be `stt_listen_start`ed before chunks arrive; a chunk for an
+  unknown stream is dropped with a log line.

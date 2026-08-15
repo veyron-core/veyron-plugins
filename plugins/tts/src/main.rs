@@ -14,21 +14,44 @@
 //! for the design rationale.
 
 use tts_plugin::handler;
-use veyron_sdk::proto::{
-    envelope, ActionResponse, ActionStatus, Envelope, PluginManifest, Pong,
-};
+use veyron_sdk::proto::{envelope, ActionResponse, ActionStatus, Envelope, PluginManifest, Pong};
 use veyron_sdk::{VeyronClient, VeyronError};
 
 const PLUGIN_ID: &str = "tts";
-const PLUGIN_VERSION: &str = "0.2.0";
+const PLUGIN_VERSION: &str = "0.3.0";
+
+/// Comma-separated allowlist of `ipc_targets` for `tts_speak` streaming.
+/// The kernel gates peer-to-peer unicast per-target (T-04): a target not
+/// listed here gets `ERR_PERMISSION_DENIED`. Default-deny — unset means
+/// `tts_speak` can only address peers the operator explicitly allows
+/// (e.g. `device.phone.speaker` for a remote speaker, D-12/D-14).
+const IPC_TARGETS_ENV: &str = "TTS_PLUGIN_IPC_TARGETS";
 
 fn manifest() -> PluginManifest {
+    let ipc_targets: Vec<String> = std::env::var(IPC_TARGETS_ENV)
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
     PluginManifest {
         // `network`: cloud providers invoke `network`'s gated `http_request`,
         // and T-19 requires callers of a gated action to hold its permission
         // too (matches plugin.json `permissions`; Manifest v2 per-action model).
-        permissions: vec!["PERMISSION_NETWORK".into()],
-        actions: vec!["tts_synthesize".to_string(), "tts_voices".to_string()],
+        // `audio_stream`: `tts_speak` streams `AudioStreamChunk`s to a peer
+        // (PERMISSION_AUDIO_STREAM, proto v1.6).
+        permissions: vec![
+            "PERMISSION_NETWORK".into(),
+            "PERMISSION_AUDIO_STREAM".into(),
+            "PERMISSION_IPC_SEND".into(),
+        ],
+        actions: vec![
+            "tts_synthesize".to_string(),
+            "tts_voices".to_string(),
+            "tts_speak".to_string(),
+        ],
+        ipc_targets,
         ..Default::default()
     }
 }
@@ -45,23 +68,35 @@ async fn handle_action_request(
     req: veyron_sdk::proto::ActionRequest,
 ) -> Envelope {
     let reply = match req.action.as_str() {
-        "tts_synthesize" => {
-            match handler::handle_tts_synthesize(client, &req.params_json).await {
-                Ok(data_json) => ActionResponse {
-                    action_id: req.action_id,
-                    status: ActionStatus::ActionOk as i32,
-                    data_json,
-                    error: String::new(),
-                },
-                Err(error) => ActionResponse {
-                    action_id: req.action_id,
-                    status: ActionStatus::ActionError as i32,
-                    data_json: Vec::new(),
-                    error,
-                },
-            }
-        }
+        "tts_synthesize" => match handler::handle_tts_synthesize(client, &req.params_json).await {
+            Ok(data_json) => ActionResponse {
+                action_id: req.action_id,
+                status: ActionStatus::ActionOk as i32,
+                data_json,
+                error: String::new(),
+            },
+            Err(error) => ActionResponse {
+                action_id: req.action_id,
+                status: ActionStatus::ActionError as i32,
+                data_json: Vec::new(),
+                error,
+            },
+        },
         "tts_voices" => match handler::handle_tts_voices(client, &req.params_json).await {
+            Ok(data_json) => ActionResponse {
+                action_id: req.action_id,
+                status: ActionStatus::ActionOk as i32,
+                data_json,
+                error: String::new(),
+            },
+            Err(error) => ActionResponse {
+                action_id: req.action_id,
+                status: ActionStatus::ActionError as i32,
+                data_json: Vec::new(),
+                error,
+            },
+        },
+        "tts_speak" => match handler::handle_tts_speak(client, &req.params_json).await {
             Ok(data_json) => ActionResponse {
                 action_id: req.action_id,
                 status: ActionStatus::ActionOk as i32,

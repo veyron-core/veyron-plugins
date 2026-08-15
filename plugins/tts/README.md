@@ -1,7 +1,9 @@
 # tts plugin
 
-Text-to-speech for Veyron plugins. Exposes two actions: `tts_synthesize`
-(turn text into audio) and `tts_voices` (list selectable voices).
+Text-to-speech for Veyron plugins. Exposes three actions: `tts_synthesize`
+(turn text into audio), `tts_voices` (list selectable voices), and
+`tts_speak` (stream Opus audio to a peer plugin — the D-12 voice
+pipeline's host-TTS → client-speaker leg).
 
 Three providers behind one normalized interface:
 
@@ -23,13 +25,16 @@ examples, every error message a caller can hit, and common patterns.
 
 ## Operator note
 
-`tts` declares one kernel permission — `network` (`plugin.json`:
-`"permissions": ["network"]`) — because its cloud providers invoke the
-`network` plugin's gated `http_request` action, and the kernel's
-anti-laundering check (T-19) requires callers of a gated action to hold
-its permission too (Manifest v2). It opens no sockets itself, so it's safe
-to run with `sandbox: true`. `network` still needs `sandbox: false` (real
-egress) for the cloud providers — see `plugins/network/README.md`.
+`tts` declares two kernel permissions — `network` and `audio_stream`
+(`plugin.json`: `"permissions": ["network", "PERMISSION_AUDIO_STREAM"]`).
+`network` because its cloud providers invoke the `network` plugin's gated
+`http_request` action, and the kernel's anti-laundering check (T-19)
+requires callers of a gated action to hold its permission too (Manifest
+v2). `audio_stream` because `tts_speak` streams `AudioStreamChunk`s to a
+peer (proto v1.6 `PERMISSION_AUDIO_STREAM`). It opens no sockets itself,
+so it's safe to run with `sandbox: true`. `network` still needs
+`sandbox: false` (real egress) for the cloud providers — see
+`plugins/network/README.md`.
 
 The local provider loads a model into RAM at first use; size `max_vmem_mb`
 above the model size (Kokoro f32 ≈ 310 MB, int8 ≈ 88 MB; piper medium ≈
@@ -110,6 +115,27 @@ Returns the voices the provider exposes:
 - `elevenlabs` — rejected: voices are per-account; list them via the
   ElevenLabs dashboard or `GET /v1/voices`.
 
+## Action: `tts_speak`
+
+Synthesize and **stream** the result as Opus to a peer plugin — the D-12
+host-TTS → client-speaker leg. Local (`sherpa`) only: the cloud providers
+return opaque containers with no PCM source to encode.
+
+```json
+{
+  "provider": "sherpa",
+  "text": "Hello from the host.",
+  "voice": "af_heart",
+  "target": "device.phone.speaker"
+}
+```
+
+See `USAGE.md` for the full field reference. In short: `target` names the
+receiving peer, the audio goes out as `AudioStreamChunk` envelopes (codec
+`OPUS`, 20 ms frames, `end_of_stream` on the last), and the action
+response is a summary (`codec`/`stream_id`/`packets`/`duration_seconds`).
+Requires `PERMISSION_AUDIO_STREAM`.
+
 ## Configuration
 
 `tts` reads no config file itself — everything is environment variables
@@ -160,8 +186,9 @@ cached for the process lifetime.
 
 ## Testing
 
-`cargo test` — 50 unit tests, no live network and no model files required
+`cargo test` — 64 unit tests, no live network and no model files required
 (providers are tested against fixture audio/JSON; sherpa config assembly
-is tested without loading a real model). End-to-end behavior was verified
+is tested without loading a real model; the Opus encoder is tested with
+encode/decode round-trips). End-to-end behavior was verified
 against a real kernel + `network` + `tts` + local Kokoro stack; there's no
 automated integration test for that yet.

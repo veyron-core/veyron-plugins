@@ -150,6 +150,67 @@ Response:
 
 `elevenlabs` → error (voices are per-account).
 
+## `tts_speak`
+
+D-12 voice pipeline: synthesize locally, encode the PCM as Opus, and stream
+it as `AudioStreamChunk`s to a peer plugin (e.g. a client speaker) — the
+host-TTS → client-speaker half of the pipeline. Local-only (`sherpa`): the
+cloud providers return opaque mp3/ogg containers with no PCM source to
+encode.
+
+Request (`ActionRequest.params_json`):
+
+```json
+{
+  "provider": "sherpa",
+  "text": "Hello from the host.",
+  "voice": "af_heart",
+  "target": "device.phone.speaker",
+  "stream_id": 1,
+  "sample_rate_hz": 24000,
+  "bitrate": 32000,
+  "speed": 1.0
+}
+```
+
+- `provider` — `"sherpa"` only. Required.
+- `text` — required, 1..=4000 chars.
+- `voice` — required; sherpa Kokoro name (`af_heart`, ...) or `sid:N`.
+- `target` — required; the peer to stream to. For a remote device this is
+  the mirrored capability id (`device.<cap>`, D-06); on one machine it can
+  be any local plugin that receives `AudioStreamChunk`s.
+- `stream_id` — optional, default `1`. Echoed in every chunk; lets the
+  receiver demux concurrent streams.
+- `sample_rate_hz` — optional; advertised stream rate. Defaults to the
+  model's output rate; must be an Opus-supported rate
+  (8000/12000/16000/24000/48000).
+- `bitrate` — optional, default `32000`; `0` = codec default.
+- `speed` — optional, `0.25`..=`4.0`, default `1.0`.
+
+Response (`ActionResponse.data_json`) once the whole clip has been streamed:
+
+```json
+{
+  "codec": "opus",
+  "stream_id": 1,
+  "target": "device.phone.speaker",
+  "sample_rate_hz": 24000,
+  "num_channels": 1,
+  "duration_seconds": 2.4,
+  "packets": 60
+}
+```
+
+The audio itself is not in the response — it went out as a sequence of
+`AudioStreamChunk` envelopes (codec `OPUS`, 20 ms frames, the last one with
+`end_of_stream: true`) addressed to `target`, with each Opus packet in
+`chunk.data`. Requires `PERMISSION_AUDIO_STREAM`.
+
+The stream is fire-and-forget from the kernel's perspective: each chunk is
+routed like any other message and there is no ack. A caller that needs
+delivery guarantees should target a local plugin and handle absence of the
+terminal `end_of_stream` chunk as a failure.
+
 ## Errors
 
 Every failure is `ACTION_ERROR` with a human-readable message in
@@ -179,6 +240,11 @@ string.
 | `network plugin error: ...` | `network` returned an action error (SSRF block, timeout, DNS) |
 | `provider returned HTTP 4xx/5xx: <body>` | the cloud provider rejected the request |
 | `malformed base64 response body: ...` | provider returned broken audio encoding |
+| `tts_speak is sherpa-only for now, got: X` | `tts_speak` with a cloud provider |
+| `missing required field: target` / `target must not be empty` | `tts_speak` without a stream destination |
+| `unsupported opus sample rate N (use 8000/12000/16000/24000/48000)` | `tts_speak` with a non-Opus rate |
+| `opus encoder init failed: ...` / `opus encode failed: ...` | Opus library error (rare) |
+| `failed to stream audio chunk to 'X': ...` | `target` unreachable / IPC error mid-stream |
 
 ## Common patterns
 
@@ -194,3 +260,11 @@ string.
 - **Synthesize is sequential.** The plugin handles one action at a time
   (same as `network`/`ai`); long local texts block briefly. Keep `text`
   short per call and fan out from your side if you need parallelism.
+- **Stream to devices with `tts_speak`.** Use it instead of
+  `tts_synthesize` when the destination is a remote speaker: Opus over
+  `AudioStreamChunk` keeps the wire compact (32 kbps vs ~384 kbps raw
+  PCM at 24 kHz). The receiving peer must accept `AudioStreamChunk`
+  envelopes and decode Opus — e.g. the Android device agent's speaker
+  capability (D-14).
+- **`tts_speak` is fire-and-forget.** No ack per chunk; treat a missing
+  terminal `end_of_stream` chunk as a failed delivery.

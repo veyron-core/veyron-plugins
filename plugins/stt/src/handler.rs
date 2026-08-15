@@ -9,9 +9,7 @@
 
 use veyron_sdk::VeyronClient;
 
-use crate::provider::{
-    openai::OpenAiProvider, ModelInfo, Provider, TranscriptResult,
-};
+use crate::provider::{openai::OpenAiProvider, ModelInfo, Provider, TranscriptResult};
 use crate::request::{self, Provider as ProviderKind, TranscribeParams};
 
 /// `network`'s `http_request` response shape (see
@@ -129,6 +127,66 @@ pub fn parse_cloud_body(
 ) -> Result<TranscriptResult, String> {
     let provider: &dyn Provider = &OpenAiProvider;
     provider.parse_response(body, params)
+}
+
+/// Event type (pre-namespacing) the listen path publishes a transcript to.
+/// The kernel namespaces it as `plugin.stt.stt_text` for subscribers.
+pub const TEXT_EVENT_TYPE: &str = "stt_text";
+
+/// Handle one `stt_listen_start` action: open an accumulation buffer for an
+/// inbound PCM audio stream. The mic-side peer then sends `AudioStreamChunk`
+/// envelopes (codec `PCM_S16LE`) addressed to `stt`.
+pub async fn handle_stt_listen_start(
+    _client: &mut VeyronClient,
+    params_json: &[u8],
+) -> Result<Vec<u8>, String> {
+    let params = request::parse_listen_start_request(params_json)?;
+    crate::listen::start(
+        params.stream_id,
+        params.sample_rate_hz,
+        params.num_channels,
+        params.language,
+    )?;
+    Ok(serde_json::json!({
+        "stream_id": params.stream_id,
+        "status": "listening",
+    })
+    .to_string()
+    .into_bytes())
+}
+
+/// Handle one `stt_listen_stop` action: transcribe the accumulated PCM for
+/// the stream (local sherpa only), publish the transcript as an
+/// `stt_text` event, and return it in the action response.
+pub async fn handle_stt_listen_stop(
+    client: &mut VeyronClient,
+    params_json: &[u8],
+) -> Result<Vec<u8>, String> {
+    let params = request::parse_listen_stop_request(params_json)?;
+    let mut stream = crate::listen::take(params.stream_id)?;
+    if stream.is_empty() {
+        return Err(format!(
+            "listen stream {} has no audio buffered",
+            params.stream_id
+        ));
+    }
+    let pcm = stream.take_pcm();
+    let result =
+        crate::provider::sherpa::transcribe_pcm(&pcm, stream.rate_hz, stream.language.as_deref())?;
+
+    let event = serde_json::json!({
+        "stream_id": params.stream_id,
+        "text": result.text,
+        "language": result.language,
+        "duration_seconds": result.duration_seconds,
+        "model": result.model,
+    });
+    client
+        .publish_event(TEXT_EVENT_TYPE, event.to_string().as_bytes(), 5000)
+        .await
+        .map_err(|e| format!("failed to publish stt_text event: {e}"))?;
+
+    Ok(event.to_string().into_bytes())
 }
 
 #[cfg(test)]

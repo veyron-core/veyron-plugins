@@ -1,7 +1,7 @@
 {
   "plugin_id": "stt",
-  "version": "0.2.0",
-  "permissions": ["network"],
+  "version": "0.3.0",
+  "permissions": ["network", "PERMISSION_AUDIO_STREAM", "PERMISSION_EVENT_PUBLISH"],
   "kernel_compatibility_range": {
     "min": "0.1.0",
     "max": "*"
@@ -10,6 +10,72 @@
   "events": [],
   "files": ["stt", "plugin.json"],
   "actions": [
+    {
+      "name": "stt_listen_start",
+      "input": {
+        "type": "object",
+        "properties": {
+          "stream_id": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 1,
+            "description": "Matches the stream_id of the inbound AudioStreamChunk envelopes."
+          },
+          "sample_rate_hz": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "PCM rate of the inbound stream. Required."
+          },
+          "num_channels": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 1,
+            "description": "Channel count of the inbound stream; downmixed to mono."
+          },
+          "language": {
+            "type": "string",
+            "description": "Optional ISO-639-1 hint applied at transcription time."
+          }
+        },
+        "required": ["sample_rate_hz"],
+        "additionalProperties": false
+      },
+      "output": {
+        "type": "object",
+        "properties": {
+          "stream_id": { "type": "integer" },
+          "status": { "type": "string", "enum": ["listening"] }
+        },
+        "required": ["stream_id", "status"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "stt_listen_stop",
+      "input": {
+        "type": "object",
+        "properties": {
+          "stream_id": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 1
+          }
+        },
+        "additionalProperties": false
+      },
+      "output": {
+        "type": "object",
+        "properties": {
+          "stream_id": { "type": "integer" },
+          "text": { "type": "string" },
+          "language": { "type": "string" },
+          "duration_seconds": { "type": "number" },
+          "model": { "type": "string" }
+        },
+        "required": ["stream_id", "text", "language", "duration_seconds", "model"],
+        "additionalProperties": false
+      }
+    },
     {
       "name": "stt_transcribe",
       "input": {

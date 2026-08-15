@@ -61,7 +61,10 @@ matches the "one blessed path per capability" convention. Actions:
 
 - **Streaming/partial transcripts** — offline recognizers only. A future
   streaming variant would need a socket-based channel and is a different
-  plugin shape.
+  plugin shape. (2026-08-15: D-12 shipped `stt_listen_start`/`stt_listen_stop`
+  — chunked PCM in, transcript out as an event — on top of the same local
+  sherpa engine; still no *partial* transcripts, the recognizer runs once
+  per stop.)
 - **VAD / diarization / timestamps** — sherpa-onnx can emit word/speaker
   metadata; not exposed yet. The normalized result shape would need
   fields for segments.

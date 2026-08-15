@@ -59,8 +59,8 @@ pub fn is_allowed_key_env(name: &str, allowed: &std::collections::HashSet<String
 /// new voice, callers must bump this (or the model they target won't
 /// accept it anyway).
 pub const OPENAI_VOICES: [&str; 12] = [
-    "alloy", "ash", "ballad", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer",
-    "verse", "amethyst",
+    "alloy", "ash", "ballad", "coral", "echo", "fable", "onyx", "nova", "sage", "shimmer", "verse",
+    "amethyst",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,8 +127,7 @@ pub fn parse_request(params_json: &[u8]) -> Result<SynthesizeParams, String> {
         timeout_ms: Option<u64>,
     }
 
-    let raw: Raw =
-        serde_json::from_slice(params_json).map_err(|e| format!("invalid JSON: {e}"))?;
+    let raw: Raw = serde_json::from_slice(params_json).map_err(|e| format!("invalid JSON: {e}"))?;
 
     let provider = match raw.provider.as_deref() {
         Some("sherpa") => Provider::Sherpa,
@@ -191,7 +190,10 @@ pub fn parse_request(params_json: &[u8]) -> Result<SynthesizeParams, String> {
         }
     };
 
-    let speed = raw.speed.unwrap_or(DEFAULT_SPEED).clamp(MIN_SPEED, MAX_SPEED);
+    let speed = raw
+        .speed
+        .unwrap_or(DEFAULT_SPEED)
+        .clamp(MIN_SPEED, MAX_SPEED);
     let timeout_ms = raw
         .timeout_ms
         .unwrap_or(DEFAULT_TIMEOUT_MS)
@@ -217,8 +219,7 @@ pub fn parse_voices_request(params_json: &[u8]) -> Result<Provider, String> {
     struct Raw {
         provider: Option<String>,
     }
-    let raw: Raw =
-        serde_json::from_slice(params_json).map_err(|e| format!("invalid JSON: {e}"))?;
+    let raw: Raw = serde_json::from_slice(params_json).map_err(|e| format!("invalid JSON: {e}"))?;
     match raw.provider.as_deref() {
         Some("sherpa") => Ok(Provider::Sherpa),
         Some("openai") => Ok(Provider::OpenAi),
@@ -230,6 +231,109 @@ pub fn parse_voices_request(params_json: &[u8]) -> Result<Provider, String> {
         Some(other) => Err(format!("unsupported provider: {other}")),
         None => Err("missing required field: provider".to_string()),
     }
+}
+
+/// Opus stream rates the speak path accepts (sherpa synthesizes at the
+/// model's rate; 24 kHz is the common Kokoro output and Opus's native
+/// speech sweet spot).
+pub const SPEAK_DEFAULT_SAMPLE_RATE: u32 = 24_000;
+
+/// Default `tts_speak` stream id when the caller omits it.
+pub const SPEAK_DEFAULT_STREAM_ID: u32 = 1;
+
+/// Default Opus bitrate for `tts_speak`; see `crate::provider::opus`.
+pub const SPEAK_DEFAULT_BITRATE: i32 = 32_000;
+
+/// Lower bound on the caller-supplied target length. The target is a
+/// kernel-routed plugin id / capability (`device.phone.speaker`, ...); a
+/// bare minimum keeps typos from silently addressing the kernel.
+pub const MIN_TARGET_CHARS: usize = 1;
+
+/// Parameters for the `tts_speak` action: synthesize then stream the audio
+/// as Opus `AudioStreamChunk`s to a peer plugin (the client speaker).
+#[derive(Debug, Clone)]
+pub struct SpeakParams {
+    pub text: String,
+    pub voice: String,
+    /// Peer to stream the Opus packets to (e.g. `device.phone.speaker`).
+    pub target: String,
+    /// Caller-chosen stream id echoed in every `AudioStreamChunk`.
+    pub stream_id: u32,
+    /// PCM sample rate the encoded stream is advertised at. `0` = use the
+    /// model's natural output rate.
+    pub sample_rate_hz: u32,
+    /// Opus encode bitrate; `0` = codec default.
+    pub bitrate: i32,
+    pub speed: f32,
+    pub timeout_ms: u64,
+}
+
+/// Parse + validate the `tts_speak` request. Local-only for now: streaming
+/// needs a PCM source, which only the sherpa provider has (cloud adapters
+/// return opaque mp3/ogg containers).
+pub fn parse_speak_request(params_json: &[u8]) -> Result<SpeakParams, String> {
+    #[derive(serde::Deserialize)]
+    struct Raw {
+        provider: Option<String>,
+        text: Option<String>,
+        voice: Option<String>,
+        target: Option<String>,
+        stream_id: Option<u32>,
+        sample_rate_hz: Option<u32>,
+        bitrate: Option<i32>,
+        speed: Option<f32>,
+        timeout_ms: Option<u64>,
+    }
+
+    let raw: Raw = serde_json::from_slice(params_json).map_err(|e| format!("invalid JSON: {e}"))?;
+
+    match raw.provider.as_deref() {
+        Some("sherpa") => {}
+        Some(other) => return Err(format!("tts_speak is sherpa-only for now, got: {other}")),
+        None => return Err("missing required field: provider".to_string()),
+    }
+
+    let text = raw.text.ok_or("missing required field: text")?;
+    let text = text.trim().to_string();
+    if text.is_empty() {
+        return Err("text must not be empty".to_string());
+    }
+    if text.chars().count() > MAX_TEXT_CHARS {
+        return Err(format!(
+            "text exceeds max length of {MAX_TEXT_CHARS} chars (got {})",
+            text.chars().count()
+        ));
+    }
+
+    let voice = raw.voice.ok_or("missing required field: voice")?;
+    if voice.is_empty() {
+        return Err("voice must not be empty".to_string());
+    }
+
+    let target = raw.target.ok_or("missing required field: target")?;
+    if target.chars().count() < MIN_TARGET_CHARS {
+        return Err("target must not be empty".to_string());
+    }
+
+    let speed = raw
+        .speed
+        .unwrap_or(DEFAULT_SPEED)
+        .clamp(MIN_SPEED, MAX_SPEED);
+    let timeout_ms = raw
+        .timeout_ms
+        .unwrap_or(DEFAULT_TIMEOUT_MS)
+        .min(MAX_TIMEOUT_MS);
+
+    Ok(SpeakParams {
+        text,
+        voice,
+        target,
+        stream_id: raw.stream_id.unwrap_or(SPEAK_DEFAULT_STREAM_ID),
+        sample_rate_hz: raw.sample_rate_hz.unwrap_or(SPEAK_DEFAULT_SAMPLE_RATE),
+        bitrate: raw.bitrate.unwrap_or(SPEAK_DEFAULT_BITRATE),
+        speed,
+        timeout_ms,
+    })
 }
 
 #[cfg(test)]
@@ -328,7 +432,10 @@ mod tests {
         });
         body["format"] = "wav".into();
         let err = parse_request(body.to_string().as_bytes()).unwrap_err();
-        assert!(err.contains("elevenlabs supports formats"), "error was: {err}");
+        assert!(
+            err.contains("elevenlabs supports formats"),
+            "error was: {err}"
+        );
     }
 
     #[test]
@@ -438,5 +545,65 @@ mod tests {
     fn voices_request_rejects_elevenlabs() {
         let err = parse_voices_request(br#"{"provider":"elevenlabs"}"#).unwrap_err();
         assert!(err.contains("per-account"), "error was: {err}");
+    }
+
+    #[test]
+    fn speak_accepts_minimal_request() {
+        let params = parse_speak_request(
+            br#"{"provider":"sherpa","text":"hi","voice":"af_heart","target":"device.phone.speaker"}"#,
+        )
+        .unwrap();
+        assert_eq!(params.text, "hi");
+        assert_eq!(params.voice, "af_heart");
+        assert_eq!(params.target, "device.phone.speaker");
+        assert_eq!(params.stream_id, SPEAK_DEFAULT_STREAM_ID);
+        assert_eq!(params.sample_rate_hz, SPEAK_DEFAULT_SAMPLE_RATE);
+        assert_eq!(params.bitrate, SPEAK_DEFAULT_BITRATE);
+        assert_eq!(params.speed, DEFAULT_SPEED);
+    }
+
+    #[test]
+    fn speak_accepts_overrides() {
+        let params = parse_speak_request(
+            br#"{"provider":"sherpa","text":"hi","voice":"sid:3","target":"speaker","stream_id":7,"sample_rate_hz":16000,"bitrate":16000,"speed":1.5}"#,
+        )
+        .unwrap();
+        assert_eq!(params.stream_id, 7);
+        assert_eq!(params.sample_rate_hz, 16_000);
+        assert_eq!(params.bitrate, 16_000);
+        assert_eq!(params.speed, 1.5);
+    }
+
+    #[test]
+    fn speak_rejects_cloud_providers() {
+        let err = parse_speak_request(
+            br#"{"provider":"openai","text":"hi","voice":"alloy","api_key_env":"OPENAI_API_KEY","target":"spk"}"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("sherpa-only"), "error was: {err}");
+    }
+
+    #[test]
+    fn speak_requires_target() {
+        let mut body = serde_json::json!({
+            "provider": "sherpa", "text": "hi", "voice": "af_heart",
+        });
+        let err = parse_speak_request(body.to_string().as_bytes()).unwrap_err();
+        assert!(err.contains("target"), "error was: {err}");
+        body["target"] = "".into();
+        let err = parse_speak_request(body.to_string().as_bytes()).unwrap_err();
+        assert!(err.contains("target"), "error was: {err}");
+    }
+
+    #[test]
+    fn speak_validates_text_and_voice_like_synthesize() {
+        let mut body = serde_json::json!({
+            "provider": "sherpa", "voice": "af_heart", "target": "spk",
+        });
+        let err = parse_speak_request(body.to_string().as_bytes()).unwrap_err();
+        assert!(err.contains("text"), "error was: {err}");
+        body["text"] = "x".repeat(MAX_TEXT_CHARS + 1).into();
+        let err = parse_speak_request(body.to_string().as_bytes()).unwrap_err();
+        assert!(err.contains("max length"), "error was: {err}");
     }
 }

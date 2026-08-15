@@ -16,12 +16,12 @@
 
 use stt_plugin::handler;
 use veyron_sdk::proto::{
-    envelope, ActionResponse, ActionStatus, Envelope, PluginManifest, Pong,
+    envelope, ActionResponse, ActionStatus, AudioCodec, Envelope, PluginManifest, Pong,
 };
 use veyron_sdk::{VeyronClient, VeyronError};
 
 const PLUGIN_ID: &str = "stt";
-const PLUGIN_VERSION: &str = "0.2.0";
+const PLUGIN_VERSION: &str = "0.3.0";
 
 fn manifest() -> PluginManifest {
     PluginManifest {
@@ -29,8 +29,21 @@ fn manifest() -> PluginManifest {
         // `http_request`, and T-19 requires callers of a gated action to hold
         // its permission too (matches plugin.json `permissions`; Manifest v2
         // per-action model).
-        permissions: vec!["PERMISSION_NETWORK".into()],
-        actions: vec!["stt_transcribe".to_string(), "stt_models".to_string()],
+        // `audio_stream`: the listen path receives `AudioStreamChunk` PCM
+        // from a mic peer (PERMISSION_AUDIO_STREAM, proto v1.6).
+        // `event_publish`: `stt_listen_stop` publishes the transcript as an
+        // `stt_text` event (PERMISSION_EVENT_PUBLISH).
+        permissions: vec![
+            "PERMISSION_NETWORK".into(),
+            "PERMISSION_AUDIO_STREAM".into(),
+            "PERMISSION_EVENT_PUBLISH".into(),
+        ],
+        actions: vec![
+            "stt_transcribe".to_string(),
+            "stt_models".to_string(),
+            "stt_listen_start".to_string(),
+            "stt_listen_stop".to_string(),
+        ],
         ..Default::default()
     }
 }
@@ -47,22 +60,20 @@ async fn handle_action_request(
     req: veyron_sdk::proto::ActionRequest,
 ) -> Envelope {
     let reply = match req.action.as_str() {
-        "stt_transcribe" => {
-            match handler::handle_stt_transcribe(client, &req.params_json).await {
-                Ok(data_json) => ActionResponse {
-                    action_id: req.action_id,
-                    status: ActionStatus::ActionOk as i32,
-                    data_json,
-                    error: String::new(),
-                },
-                Err(error) => ActionResponse {
-                    action_id: req.action_id,
-                    status: ActionStatus::ActionError as i32,
-                    data_json: Vec::new(),
-                    error,
-                },
-            }
-        }
+        "stt_transcribe" => match handler::handle_stt_transcribe(client, &req.params_json).await {
+            Ok(data_json) => ActionResponse {
+                action_id: req.action_id,
+                status: ActionStatus::ActionOk as i32,
+                data_json,
+                error: String::new(),
+            },
+            Err(error) => ActionResponse {
+                action_id: req.action_id,
+                status: ActionStatus::ActionError as i32,
+                data_json: Vec::new(),
+                error,
+            },
+        },
         "stt_models" => match handler::handle_stt_models(client, &req.params_json).await {
             Ok(data_json) => ActionResponse {
                 action_id: req.action_id,
@@ -77,6 +88,38 @@ async fn handle_action_request(
                 error,
             },
         },
+        "stt_listen_start" => {
+            match handler::handle_stt_listen_start(client, &req.params_json).await {
+                Ok(data_json) => ActionResponse {
+                    action_id: req.action_id,
+                    status: ActionStatus::ActionOk as i32,
+                    data_json,
+                    error: String::new(),
+                },
+                Err(error) => ActionResponse {
+                    action_id: req.action_id,
+                    status: ActionStatus::ActionError as i32,
+                    data_json: Vec::new(),
+                    error,
+                },
+            }
+        }
+        "stt_listen_stop" => {
+            match handler::handle_stt_listen_stop(client, &req.params_json).await {
+                Ok(data_json) => ActionResponse {
+                    action_id: req.action_id,
+                    status: ActionStatus::ActionOk as i32,
+                    data_json,
+                    error: String::new(),
+                },
+                Err(error) => ActionResponse {
+                    action_id: req.action_id,
+                    status: ActionStatus::ActionError as i32,
+                    data_json: Vec::new(),
+                    error,
+                },
+            }
+        }
         other => ActionResponse {
             action_id: req.action_id,
             status: ActionStatus::ActionNotFound as i32,
@@ -124,6 +167,25 @@ async fn serve(mut client: VeyronClient) -> Result<(), VeyronError> {
                 // stt declares no event subscriptions; ack defensively so
                 // the kernel doesn't retry anything unexpectedly delivered.
                 let _ = client.ack_event(&event.event_id).await;
+            }
+            Some(envelope::Payload::AudioStreamChunk(chunk)) => {
+                // D-12 listen path: accumulate PCM from a mic peer; the
+                // transcript is produced by the stt_listen_stop action.
+                if chunk.codec != AudioCodec::PcmS16le as i32 {
+                    println!(
+                        "[{PLUGIN_ID}] ignoring audio stream {} codec {} (expected PCM_S16LE)",
+                        chunk.stream_id, chunk.codec
+                    );
+                    continue;
+                }
+                if let Err(e) = stt_plugin::listen::push(
+                    chunk.stream_id,
+                    chunk.sample_rate,
+                    chunk.channels.max(1) as u16,
+                    &chunk.data,
+                ) {
+                    println!("[{PLUGIN_ID}] {e}");
+                }
             }
             Some(envelope::Payload::ActionRequest(req)) => {
                 let resp = handle_action_request(&mut client, req).await;

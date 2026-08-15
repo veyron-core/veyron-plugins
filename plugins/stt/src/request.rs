@@ -136,8 +136,7 @@ pub fn parse_request(params_json: &[u8]) -> Result<TranscribeParams, String> {
         timeout_ms: Option<u64>,
     }
 
-    let raw: Raw =
-        serde_json::from_slice(params_json).map_err(|e| format!("invalid JSON: {e}"))?;
+    let raw: Raw = serde_json::from_slice(params_json).map_err(|e| format!("invalid JSON: {e}"))?;
 
     let provider = match raw.provider.as_deref() {
         Some("sherpa") => Provider::Sherpa,
@@ -218,7 +217,9 @@ pub fn parse_request(params_json: &[u8]) -> Result<TranscribeParams, String> {
         }
     };
 
-    let temperature = raw.temperature.map(|t| t.clamp(MIN_TEMPERATURE, MAX_TEMPERATURE));
+    let temperature = raw
+        .temperature
+        .map(|t| t.clamp(MIN_TEMPERATURE, MAX_TEMPERATURE));
 
     // Cloud providers need an allowlisted env var name; local does not.
     let api_key_env = match (provider, raw.api_key_env) {
@@ -267,14 +268,76 @@ pub fn parse_models_request(params_json: &[u8]) -> Result<Provider, String> {
     struct Raw {
         provider: Option<String>,
     }
-    let raw: Raw =
-        serde_json::from_slice(params_json).map_err(|e| format!("invalid JSON: {e}"))?;
+    let raw: Raw = serde_json::from_slice(params_json).map_err(|e| format!("invalid JSON: {e}"))?;
     match raw.provider.as_deref() {
         Some("sherpa") => Ok(Provider::Sherpa),
         Some("openai") => Ok(Provider::OpenAi),
         Some(other) => Err(format!("unsupported provider: {other}")),
         None => Err("missing required field: provider".to_string()),
     }
+}
+
+/// Default `stt_listen_*` stream id when the caller omits it.
+pub const LISTEN_DEFAULT_STREAM_ID: u32 = 1;
+
+/// Parameters for the `stt_listen_start` action: open an accumulation
+/// buffer for an inbound PCM audio stream.
+#[derive(Debug, Clone)]
+pub struct ListenStartParams {
+    pub stream_id: u32,
+    pub sample_rate_hz: u32,
+    pub num_channels: u16,
+    /// ISO-639-1 hint applied at transcription time.
+    pub language: Option<String>,
+}
+
+/// Parse + validate the `stt_listen_start` request.
+pub fn parse_listen_start_request(params_json: &[u8]) -> Result<ListenStartParams, String> {
+    #[derive(serde::Deserialize)]
+    struct Raw {
+        stream_id: Option<u32>,
+        sample_rate_hz: Option<u32>,
+        num_channels: Option<u16>,
+        language: Option<String>,
+    }
+    let raw: Raw = serde_json::from_slice(params_json).map_err(|e| format!("invalid JSON: {e}"))?;
+
+    let sample_rate_hz = raw
+        .sample_rate_hz
+        .ok_or("missing required field: sample_rate_hz")?;
+    if sample_rate_hz == 0 {
+        return Err("sample_rate_hz must be > 0".to_string());
+    }
+    let num_channels = raw.num_channels.unwrap_or(1);
+    if num_channels == 0 {
+        return Err("num_channels must be > 0".to_string());
+    }
+
+    Ok(ListenStartParams {
+        stream_id: raw.stream_id.unwrap_or(LISTEN_DEFAULT_STREAM_ID),
+        sample_rate_hz,
+        num_channels,
+        language: raw.language.filter(|l| !l.is_empty()),
+    })
+}
+
+/// Parameters for the `stt_listen_stop` action: transcribe the accumulated
+/// buffer for one stream.
+#[derive(Debug, Clone)]
+pub struct ListenStopParams {
+    pub stream_id: u32,
+}
+
+/// Parse + validate the `stt_listen_stop` request.
+pub fn parse_listen_stop_request(params_json: &[u8]) -> Result<ListenStopParams, String> {
+    #[derive(serde::Deserialize)]
+    struct Raw {
+        stream_id: Option<u32>,
+    }
+    let raw: Raw = serde_json::from_slice(params_json).map_err(|e| format!("invalid JSON: {e}"))?;
+    Ok(ListenStopParams {
+        stream_id: raw.stream_id.unwrap_or(LISTEN_DEFAULT_STREAM_ID),
+    })
 }
 
 #[cfg(test)]
@@ -525,5 +588,49 @@ mod tests {
     fn models_request_rejects_unknown_provider() {
         let err = parse_models_request(br#"{"provider":"google"}"#).unwrap_err();
         assert!(err.contains("unsupported provider"), "error was: {err}");
+    }
+
+    #[test]
+    fn listen_start_accepts_minimal_request() {
+        let params = parse_listen_start_request(br#"{"sample_rate_hz":16000}"#).unwrap();
+        assert_eq!(params.stream_id, LISTEN_DEFAULT_STREAM_ID);
+        assert_eq!(params.sample_rate_hz, 16_000);
+        assert_eq!(params.num_channels, 1);
+        assert_eq!(params.language, None);
+    }
+
+    #[test]
+    fn listen_start_accepts_overrides() {
+        let params = parse_listen_start_request(
+            br#"{"stream_id":3,"sample_rate_hz":24000,"num_channels":2,"language":"en"}"#,
+        )
+        .unwrap();
+        assert_eq!(params.stream_id, 3);
+        assert_eq!(params.sample_rate_hz, 24_000);
+        assert_eq!(params.num_channels, 2);
+        assert_eq!(params.language.as_deref(), Some("en"));
+    }
+
+    #[test]
+    fn listen_start_requires_sample_rate() {
+        let err = parse_listen_start_request(br#"{}"#).unwrap_err();
+        assert!(err.contains("sample_rate_hz"), "error was: {err}");
+        let err = parse_listen_start_request(br#"{"sample_rate_hz":0}"#).unwrap_err();
+        assert!(err.contains("> 0"), "error was: {err}");
+    }
+
+    #[test]
+    fn listen_start_rejects_zero_channels() {
+        let err = parse_listen_start_request(br#"{"sample_rate_hz":16000,"num_channels":0}"#)
+            .unwrap_err();
+        assert!(err.contains("> 0"), "error was: {err}");
+    }
+
+    #[test]
+    fn listen_stop_defaults_stream_id() {
+        let params = parse_listen_stop_request(br#"{}"#).unwrap();
+        assert_eq!(params.stream_id, LISTEN_DEFAULT_STREAM_ID);
+        let params = parse_listen_stop_request(br#"{"stream_id":9}"#).unwrap();
+        assert_eq!(params.stream_id, 9);
     }
 }
