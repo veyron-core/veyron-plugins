@@ -21,16 +21,22 @@ impl Provider for AnthropicProvider {
             .map(|m| serde_json::json!({"role": m.role, "content": m.content}))
             .collect();
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": params.model,
             "max_tokens": params.max_tokens,
             "messages": messages,
-        })
-        .to_string();
+        });
+        if let Some(system) = params.system_prompt.as_deref().filter(|s| !s.is_empty()) {
+            body["system"] = system.into();
+        }
+        let body = body.to_string();
 
         let mut headers = HashMap::new();
         headers.insert("x-api-key".to_string(), api_key.to_string());
-        headers.insert("anthropic-version".to_string(), ANTHROPIC_VERSION.to_string());
+        headers.insert(
+            "anthropic-version".to_string(),
+            ANTHROPIC_VERSION.to_string(),
+        );
         headers.insert("content-type".to_string(), "application/json".to_string());
 
         HttpRequestJson {
@@ -99,6 +105,8 @@ mod tests {
             }],
             max_tokens: 1024,
             timeout_ms: 30_000,
+            agent_id: None,
+            system_prompt: None,
         }
     }
 
@@ -133,7 +141,9 @@ mod tests {
             "usage": {"input_tokens": 1, "output_tokens": 0}
         })
         .to_string();
-        let err = AnthropicProvider.parse_response(body.as_bytes()).unwrap_err();
+        let err = AnthropicProvider
+            .parse_response(body.as_bytes())
+            .unwrap_err();
         assert!(err.contains("no content blocks"), "error was: {err}");
     }
 
