@@ -129,7 +129,10 @@ mod tests {
         }
 
         let mut seen = std::collections::HashSet::new();
-        for _ in 0..N {
+        let mut changed_events = 0usize;
+        // 2N envelopes: every db_set yields its ActionResponse plus one
+        // best-effort `changed` event (v0.3 change events).
+        for _ in 0..(2 * N) {
             let env = tokio::time::timeout(Duration::from_secs(5), kernel.recv())
                 .await
                 .expect("timed out waiting for response — loop likely deadlocked")
@@ -139,9 +142,15 @@ mod tests {
                     assert_eq!(resp.status, ActionStatus::ActionOk as i32);
                     assert!(seen.insert(resp.action_id), "duplicate response");
                 }
+                Some(envelope::Payload::EventPublish(ev)) => {
+                    assert_eq!(ev.event_type, "changed");
+                    changed_events += 1;
+                }
                 other => panic!("unexpected payload: {other:?}"),
             }
         }
+        assert_eq!(seen.len(), N, "expected one response per request");
+        assert_eq!(changed_events, N, "expected one change event per db_set");
 
         // Ask the loop to exit cleanly and make sure it does.
         let shutdown = Envelope {

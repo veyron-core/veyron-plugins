@@ -42,3 +42,31 @@ only tracks what's deliberately deferred.
   once this ships — they're thin schema layers on top of `db_query`.
 - `scheduler` depends on this plugin for persisting schedule state across
   kernel restarts (root `ROADMAP.md`).
+
+## v0.3 — feature batch (2026-08, agreed)
+
+All buildable now — no kernel changes. Status updated after implementation:
+
+- **`db_incr {key, delta?}`** — atomic integer counter (default delta `1`,
+  negatives allowed; starts at `delta` when the key is missing; errors when
+  the stored value is not an integer). Returns `{ok, value}`. Status: **done**.
+- **`db_keys {prefix?}`** — list key names, optional prefix filter
+  (`%`/`_` escaped), sorted. Returns `{keys}`. Status: **done**.
+- **`db_append {key, value}`** — atomic append to a JSON-array value; starts
+  a new array when the key is missing; errors when the stored value is not
+  an array. Returns `{ok, length}`. Status: **done**.
+- **KV TTL** — `db_set {ttl_ms?}` stores an `expires_at` column (schema
+  migration for existing `.db` files); every action sweeps expired rows
+  first, and accessors treat expired keys as missing. Deliberately reverses
+  the v1 "no TTL" non-goal (agent caches need it). Status: **done**.
+- **`db_patch {key, path, value}`** — JSON-path update via SQLite
+  `json_set` (`$.a.b`, `$[0]`); errors when the key is missing. Returns
+  `{ok, value}`. Status: **done**.
+- **Change events** — mutations publish a best-effort
+  `plugin.database.changed` event `{caller, action, key}` (same
+  fire-and-forget pattern as `network.request_completed`); the manifest
+  gains `PERMISSION_EVENT_PUBLISH`. Status: **done**.
+
+Deferred (above medium cost): multi-statement transactions (BEGIN/COMMIT
+across calls needs a transaction-pinning design against the pooled
+connections).
