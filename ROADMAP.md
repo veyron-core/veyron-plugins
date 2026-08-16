@@ -1,5 +1,13 @@
 # veyron-plugins roadmap
 
+> **Naming:** Veyron is being renamed **vynkor** ("veyron core") — the
+> kernel and all sibling repos, eventually. New code and docs written from
+> now on use **vynkor**; "Veyron" remains only for the historical name or
+> in-flight renames. Stable identifiers (`plugin_id` slugs, binary names,
+> `*_PLUGIN_*` env vars, permission strings) keep their current spellings —
+> they are protocol/config surfaces, not prose. The `vyn` binary stays
+> `vyn`. This file itself will be reworded with the rename.
+
 Plugin ideas beyond what's shipped, and the order/dependencies between them.
 Each plugin gets its own `plugins/<name>/ROADMAP.md` once work starts (see
 `plugins/ai/ROADMAP.md`, `plugins/network/ROADMAP.md` for the pattern) — this
@@ -10,13 +18,14 @@ file is the cross-plugin picture only.
 | Plugin | Path | Depends on | Notes |
 |---|---|---|---|
 | `ping-pong-rs` | `plugins/ping-pong-rs/` | — | example plugin, no real capability |
-| `network` | `plugins/network/` | — | outbound HTTP, `PERMISSION_NETWORK`, SSRF-guarded |
+| `network` | `plugins/network/` | — | outbound HTTP, `PERMISSION_NETWORK`, SSRF-guarded. v0.4: gzip/brotli/deflate/zstd, `multipart` bodies, `network_stats`, `cache_ttl_ms`, `use_cookies` |
 | `ai` | `plugins/ai/` | `network` | LLM chat completion (anthropic/openai-compatible), declares `network` — caller of `network`'s gated `http_request` (T-19) |
-| `database` | `plugins/database/` | — | KV/SQL storage primitive, `PERMISSION_STORAGE`, per-caller SQLite file isolation |
+| `database` | `plugins/database/` | — | KV/SQL storage primitive, `PERMISSION_STORAGE`, per-caller SQLite file isolation. v0.3: `db_incr`/`db_keys`/`db_append`/`db_patch`, KV TTL (`ttl_ms`), `db.changed` change events |
 | `tts` | `plugins/tts/` | `network` (cloud providers) | text-to-speech — local ONNX (sherpa: Kokoro/Piper) in-process + openai/elevenlabs via `network`, declares `network` (caller of gated `http_request`). **D-12:** `tts_speak` streams Opus `AudioStreamChunk`s to a peer (`PERMISSION_AUDIO_STREAM`) |
 | `stt` | `plugins/stt/` | `network` (cloud provider) | speech-to-text — local ONNX (sherpa: zipformer/whisper) in-process + openai audio via `network`, declares `network` (caller of gated `http_request`). **D-12:** `stt_listen_start`/`stt_listen_stop` stream PCM in and publish a `stt_text` event (`PERMISSION_AUDIO_STREAM`, `PERMISSION_EVENT_PUBLISH`) |
 | `secrets` | `plugins/secrets/` | — | encrypted credential/API-key vault (`secret_get`/`secret_set`/`secret_delete`/`secret_list`), ChaCha20-Poly1305 per-caller `.vault` files, master key via `SECRETS_PLUGIN_MASTER_KEY`, `PERMISSION_SECRETS` (proto v1.4) |
 | `gated-write` | `plugins/gated-write/` | — | reference impl of the D-09 confirmation gate: risky file write split into `request_write` (any caller, `requires_confirmation`) + `confirm_write` (allowlisted callers only), writes confined to a data dir |
+| `notify` | `plugins/notify/` | — | desktop/system notifications via host binaries — `notify-send` (libnotify), `wall`, `espeak`; argv-only spawn, never a shell (`PERMISSION_NOTIFY`). v0.2: `speak: true` озвучка через `tts`-плагин (`tts_synthesize` + локальный плеер), `silent: true` + inbox (`notify_list`/`notify_mark_read`/`notify_delete`) — скрытые уведомления, которые будущий `agent` сможет просматривать |
 | `sync` | `plugins/sync/` | — | host-side sync state primitive (D-13): versioned SQLite KV + `sync_get_snapshot`/`sync_get`/`sync_set`/`sync_del`, publishes `sync.delta` events on every mutation (`PERMISSION_STORAGE`, `PERMISSION_EVENT_PUBLISH`) |
 | `sync-client` | `plugins/sync-client/` | `sync` | client-side mirror + heartbeat scheduler (D-13): subscribes to `sync.delta`, pulls `sync_get_snapshot` on (re)connect to catch up, pushes its heartbeat into host state via `sync_set` on a timer (`PERMISSION_SCHEDULER`, `PERMISSION_IPC_SEND`) |
 
@@ -58,10 +67,13 @@ itself: T-19 requires the *caller* of a gated action to hold its permission,
 and the per-action `permission` in `network`'s manifest makes that check
 data-driven ("any caller without the permission is denied").
 
-`secrets` shipped (0.1.0) — `network`/`ai`/`tts`/`stt` still keep provider API
-keys in plaintext config env vars; the near-term item is migrating them onto
-the vault (see `plugins/secrets/ROADMAP.md`), keeping the env-var name as the
-lookup handle so the per-caller permission story stays intact.
+`secrets` shipped (0.1.0) — `ai`/`tts`/`stt` now resolve provider API keys
+**vault-first**: `secret_get` against their own per-caller vault keyed by the
+env-var-style handle (`api_key_env`), with the plaintext config env var as
+fallback — the vault wins when both exist. `network` keeps no keys (it is the
+transport; callers attach them). The allowlist
+(`AI_PLUGIN_ALLOWED_KEY_ENVS` etc.) still gates which handles a caller may
+reference.
 
 `agent` ships last: it's the integration point for everything else, so it's
 the plugin most likely to change shape once the others exist and their real
