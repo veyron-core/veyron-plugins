@@ -1,0 +1,24 @@
+[package]
+name = "notify-plugin"
+version = "0.2.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "notify_plugin"
+path = "src/lib.rs"
+
+[[bin]]
+name = "notify"
+path = "src/main.rs"
+
+[dependencies]
+veyron-sdk = "0.1"
+veyron-wire = "0.2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+
+[dev-dependencies]
+tempfile = "3"
