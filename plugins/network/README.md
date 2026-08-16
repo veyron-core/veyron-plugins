@@ -1,7 +1,8 @@
 # network plugin
 
-Outbound HTTP for Veyron plugins/kernel. Exposes one action, `http_request`,
-guarded by `PERMISSION_NETWORK`. See
+Outbound HTTP for Veyron plugins/kernel. Exposes two actions:
+`http_request` (guarded by `PERMISSION_NETWORK`) and `network_stats`
+(per-caller request/error/latency counters). See
 `docs/superpowers/specs/2026-07-05-network-plugin-design.md` for the full
 design (request/response shape, guardrails, error mapping).
 
@@ -135,7 +136,60 @@ unlimited) caps how many requests one calling plugin may have in flight at
 once, so a single noisy plugin can't monopolize `network`'s outbound
 connections while others starve. A request over the cap is rejected
 immediately with an `ACTION_ERROR` naming the caller and the limit; slots
-free up as in-flight requests complete.
+free up as in-flight requests complete. `network_stats` is never
+cap-gated — it does not use the network.
+
+## Compression
+
+`gzip`, `brotli`, `deflate`, and `zstd` response bodies are decompressed
+transparently (reqwest features enabled at build time). A response with
+`Content-Encoding: gzip` arrives with the decompressed text in `body` —
+callers never see compressed bytes or need to handle the encoding.
+
+## Multipart bodies
+
+`http_request` accepts a `multipart` param — an array of
+`{name, value|file_base64, filename?, content_type?}` parts — instead of
+`body`/`body_base64` (mutually exclusive with both). The plugin builds the
+`multipart/form-data` wire body, generates the boundary, and overrides the
+`Content-Type` header; a caller that previously hand-built multipart
+uploads (e.g. the `stt` plugin's audio upload) can send parts directly.
+Per-part and total decoded sizes are capped at 25 MiB, part names at
+256 bytes, filenames at 1024 bytes; `"` in names/filenames is escaped and
+CR/LF stripped so no part can break the framing.
+
+## Per-request cache
+
+`cache_ttl_ms` on `http_request` serves repeat requests from a bounded
+in-memory, **per-caller** cache: a fresh hit returns the stored 2xx
+response without any network egress, and the response carries
+`"cache": "hit"` (`"miss"` when the request went to the origin). Only 2xx
+responses are cached; `Cache-Control: no-store` responses are never
+cached; the cache is keyed per caller+method+url+body, holds at most
+128 entries / ~8 MiB (oldest evicted first), and is cleared on plugin
+restart. Deliberate edge: a cache hit is served *before* the SSRF gates —
+a URL that would now be blocked still returns the data the original caller
+fetched earlier (no re-resolution, no egress; per-caller keying means only
+the original caller can see its own cached data).
+
+## Session cookies
+
+`use_cookies: true` on `http_request` keeps a per-caller in-memory session
+cookie jar: `Set-Cookie` headers on the response update it, and matching
+cookies are attached to later requests to the same host. The caller's own
+`Cookie` header wins over the jar. The jar is deliberately minimal — exact
+host scoping only, no expiry/domain/path matching, in-memory (cleared on
+restart), and cookie values are control-char-stripped so a hostile server
+can't inject header framing. Enough for login-then-fetch session flows,
+not a browser-grade cookie store.
+
+## `network_stats`
+
+`{totals: {requests, errors, avg_latency_ms}, per_caller: {caller: {...}}}`
+— aggregated from every completed `http_request`. An `error` is a
+transport/SSRF failure, no HTTP response (status 0), or an HTTP status
+`>= 400`. Gated by `PERMISSION_NETWORK` like `http_request`; resets on
+plugin restart.
 
 ## Allowlist mode (operator-configurable)
 

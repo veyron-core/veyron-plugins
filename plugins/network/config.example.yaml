@@ -39,6 +39,14 @@ plugins:
       # (default 8; 0 = unlimited). A caller over the cap is rejected with
       # an ACTION_ERROR until its in-flight requests finish.
       # - NETWORK_PLUGIN_MAX_INFLIGHT_PER_CALLER=8
+
+      # v0.4 features need no operator configuration:
+      #   - Compression (gzip/brotli/deflate/zstd) is transparent — enabled
+      #     at build time, responses arrive decompressed automatically.
+      #   - `multipart` bodies, `cache_ttl_ms` and `use_cookies` are
+      #     per-request params; the cache and cookie jars are in-memory and
+      #     per-caller (cleared on plugin restart, never persisted).
+      #   - `network_stats` is a normal action, gated like http_request.
     grace_seconds: 10
     max_procs: 64
     max_vmem_mb: 512

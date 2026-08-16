@@ -58,6 +58,28 @@ policy, egress control, and observability live in one place.
 
 (none — the near-term items above shipped in 0.2.0.)
 
+## v0.4 — feature batch (2026-08, agreed)
+
+All buildable now. Status updated after implementation:
+
+- **Compression** — enable reqwest `gzip`/`brotli`/`deflate`/`zstd` so
+  `Content-Encoding` responses arrive decompressed (today they come back as
+  garbage bytes/base64). Status: **done**.
+- **`multipart` body** — `http_request` gains a `multipart` param building
+  `multipart/form-data` from parts (`{name, value|file_base64, filename?,
+  content_type?}`); mutually exclusive with `body`/`body_base64`; sets the
+  boundary + `Content-Type`. Status: **done**.
+- **`network_stats` action** — per-caller + totals counters (requests,
+  errors, avg latency) tracked from each attempt; gated by
+  `PERMISSION_NETWORK` like `http_request`. Status: **done**.
+- **HTTP cache** — `cache_ttl_ms` param, bounded in-memory per-caller cache
+  (2xx only, honors `Cache-Control: no-store`, oldest-eviction). Status:
+  **done**.
+- **Cookie jar** — `use_cookies` param, minimal per-caller in-memory
+  session jar (host-scoped, Set-Cookie parse + Cookie attach; no
+  expiry/domain/path matching beyond exact host; cleared on restart).
+  Status: **done**.
+
 ## Requires kernel/protocol changes (see `KERNEL_PROTOCOL_TODO.md`, gitignored)
 
 - **`http_request_stream` action** — avoid full-body buffering for large

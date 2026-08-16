@@ -98,6 +98,9 @@ impl ClientConfig {
     }
 }
 
+/// Per-caller session cookie jars: caller -> host -> (name, value).
+type CookieJar = HashMap<String, HashMap<String, Vec<(String, String)>>>;
+
 struct NetworkPlugin {
     /// Shared no-redirect client — the default path, so connection pooling
     /// is preserved for callers that don't follow redirects.
@@ -116,6 +119,24 @@ struct NetworkPlugin {
     allowlist: network_plugin::ssrf::Allowlist,
     /// Per-caller in-flight cap for the `http_request` concurrency gate.
     inflight: Inflight,
+    /// Per-caller request/error/latency counters for `network_stats`.
+    stats: Mutex<HashMap<String, CallerStats>>,
+    /// Per-caller bounded in-memory response cache (`cache_ttl_ms`).
+    cache: Mutex<network_plugin::handler::CacheStore>,
+    /// Per-caller session cookie jars (see [`CookieJar`]).
+    jars: Mutex<CookieJar>,
+}
+
+/// Aggregated counters for one caller, read by the `network_stats` action.
+#[derive(Debug, Default, Clone, Copy)]
+struct CallerStats {
+    requests: u64,
+    errors: u64,
+    latency_sum_ms: u64,
+}
+
+fn avg_latency_ms(s: &CallerStats) -> u64 {
+    s.latency_sum_ms.checked_div(s.requests).unwrap_or(0)
 }
 
 impl NetworkPlugin {
@@ -147,6 +168,9 @@ impl NetworkPlugin {
             extra_blocklist,
             allowlist,
             inflight: Inflight::new(max_inflight_per_caller),
+            stats: Mutex::new(HashMap::new()),
+            cache: Mutex::new(network_plugin::handler::CacheStore::new()),
+            jars: Mutex::new(HashMap::new()),
         }
     }
 
@@ -227,7 +251,55 @@ impl NetworkPlugin {
         }
     }
 
-    async fn handle_http_request(&self, params_json: &[u8]) -> HttpOutcome {
+    async fn handle_http_request(&self, caller_plugin_id: &str, params_json: &[u8]) -> HttpOutcome {
+        let outcome = self.run_http_request(caller_plugin_id, params_json).await;
+        self.record_stats(caller_plugin_id, &outcome);
+        outcome
+    }
+
+    /// Count one completed request into the caller's `network_stats`
+    /// counters. Errors = transport/SSRF failure (Err), no HTTP response
+    /// (status 0), or an HTTP error status (>= 400).
+    fn record_stats(&self, caller_plugin_id: &str, outcome: &HttpOutcome) {
+        let mut stats = self.stats.lock().unwrap();
+        let entry = stats.entry(caller_plugin_id.to_string()).or_default();
+        entry.requests += 1;
+        if outcome.response.is_err() || outcome.status == 0 || outcome.status >= 400 {
+            entry.errors += 1;
+        }
+        entry.latency_sum_ms = entry.latency_sum_ms.saturating_add(outcome.latency_ms);
+    }
+
+    /// `{totals, per_caller}` counters payload for the `network_stats` action.
+    fn network_stats_json(&self) -> Vec<u8> {
+        let stats = self.stats.lock().unwrap();
+        let mut per_caller = serde_json::Map::new();
+        let mut totals = CallerStats::default();
+        for (caller, s) in stats.iter() {
+            totals.requests += s.requests;
+            totals.errors += s.errors;
+            totals.latency_sum_ms += s.latency_sum_ms;
+            per_caller.insert(
+                caller.clone(),
+                serde_json::json!({
+                    "requests": s.requests,
+                    "errors": s.errors,
+                    "avg_latency_ms": avg_latency_ms(s),
+                }),
+            );
+        }
+        serde_json::to_vec(&serde_json::json!({
+            "totals": {
+                "requests": totals.requests,
+                "errors": totals.errors,
+                "avg_latency_ms": avg_latency_ms(&totals),
+            },
+            "per_caller": per_caller,
+        }))
+        .unwrap_or_default()
+    }
+
+    async fn run_http_request(&self, caller_plugin_id: &str, params_json: &[u8]) -> HttpOutcome {
         let started = std::time::Instant::now();
         let params = match request::parse_request(params_json) {
             Ok(params) => params,
@@ -245,6 +317,48 @@ impl NetworkPlugin {
             .ok()
             .and_then(|u| u.host_str().map(str::to_string))
             .unwrap_or_default();
+
+        // Cache lookup happens BEFORE the SSRF gates on purpose: a cached
+        // hit for a URL that would now be blocked still serves the data the
+        // original caller fetched earlier (no re-resolution, no egress). The
+        // cache is per-caller, so only the original caller can see its own
+        // cached data.
+        let cache_ttl = params.cache_ttl_ms;
+        let cache_key_opt = (cache_ttl > 0).then(|| {
+            handler::cache_key(
+                caller_plugin_id,
+                &params.method,
+                &params.url,
+                handler::request_body_hash(&params),
+            )
+        });
+        if let Some(key) = &cache_key_opt {
+            let now_ms = unix_millis();
+            let store = self.cache.lock().unwrap();
+            if let Some(entry) = store.get(key, now_ms) {
+                let mut resp = handler::HttpResponseJson {
+                    status: entry.status,
+                    headers: entry.headers.clone(),
+                    body: String::new(),
+                    body_encoding: entry.body_encoding,
+                    cache: Some("hit"),
+                };
+                resp.body = match entry.body_encoding {
+                    "utf8" => String::from_utf8_lossy(&entry.body).into_owned(),
+                    _ => {
+                        use base64::Engine;
+                        base64::engine::general_purpose::STANDARD.encode(&entry.body)
+                    }
+                };
+                return HttpOutcome {
+                    response: response_json(&resp),
+                    status: entry.status,
+                    host,
+                    latency_ms: started.elapsed().as_millis() as u64,
+                    retry_count: 0,
+                };
+            }
+        }
 
         // `SsrfSafeResolver` never runs for a literal-IP host (see its gate
         // in `redirect_policy`'s doc comment) — this is the only check for
@@ -290,18 +404,79 @@ impl NetworkPlugin {
             }
         }
 
-        let outcome = handler::fetch_with_stats(self.client_for(&params), &params).await;
+        // Session cookies: a short-lived snapshot of the caller's jar for
+        // this host, attached by the fetch path only when the caller sent
+        // no `Cookie` header itself. `Set-Cookie` headers on the response
+        // update the jar afterwards.
+        let attach_cookies: Option<Vec<(String, String)>> = if params.use_cookies {
+            self.jars
+                .lock()
+                .unwrap()
+                .get(caller_plugin_id)
+                .and_then(|jar| jar.get(&host))
+                .cloned()
+        } else {
+            None
+        };
+
+        let outcome = handler::fetch_with_stats(
+            self.client_for(&params),
+            &params,
+            attach_cookies.as_deref(),
+            params.use_cookies,
+        )
+        .await;
+
+        if params.use_cookies && !outcome.set_cookies.is_empty() && !host.is_empty() {
+            let mut jars = self.jars.lock().unwrap();
+            let list = jars
+                .entry(caller_plugin_id.to_string())
+                .or_default()
+                .entry(host.clone())
+                .or_default();
+            for (name, value) in &outcome.set_cookies {
+                if let Some(existing) = list.iter_mut().find(|(n, _)| n == name) {
+                    existing.1 = value.clone();
+                } else {
+                    list.push((name.clone(), value.clone()));
+                }
+            }
+        }
+
         let (response, status) = match outcome.response {
-            Ok(resp) => (
-                serde_json::to_vec(&serde_json::json!({
-                    "status": resp.status,
-                    "headers": resp.headers,
-                    "body": resp.body,
-                    "body_encoding": resp.body_encoding,
-                }))
-                .map_err(|e| format!("failed to encode response: {e}")),
-                resp.status,
-            ),
+            Ok(mut resp) => {
+                let status = resp.status;
+                if let Some(key) = &cache_key_opt {
+                    resp.cache = Some("miss");
+                    if handler::is_cacheable(resp.status, &resp.headers) {
+                        let body_bytes: Option<Vec<u8>> = match resp.body_encoding {
+                            "utf8" => Some(resp.body.clone().into_bytes()),
+                            _ => {
+                                use base64::Engine;
+                                base64::engine::general_purpose::STANDARD
+                                    .decode(&resp.body)
+                                    .ok()
+                            }
+                        };
+                        if let Some(body_bytes) = body_bytes {
+                            let now_ms = unix_millis();
+                            let mut store = self.cache.lock().unwrap();
+                            store.put(
+                                key.clone(),
+                                handler::CacheEntry {
+                                    stored_at_ms: now_ms,
+                                    expires_at_ms: now_ms.saturating_add(cache_ttl),
+                                    status: resp.status,
+                                    headers: resp.headers.clone(),
+                                    body: body_bytes,
+                                    body_encoding: resp.body_encoding,
+                                },
+                            );
+                        }
+                    }
+                }
+                (response_json(&resp), status)
+            }
             Err(e) => (Err(e), 0),
         };
         HttpOutcome {
@@ -351,13 +526,38 @@ fn event_envelope(outcome: &HttpOutcome) -> Envelope {
     }
 }
 
+/// Serialize the `http_request` response JSON. The `cache` field appears
+/// only when caching was requested for the request (never as `null`).
+fn response_json(resp: &handler::HttpResponseJson) -> Result<Vec<u8>, String> {
+    let mut obj = serde_json::Map::new();
+    obj.insert("status".into(), serde_json::json!(resp.status));
+    obj.insert("headers".into(), serde_json::json!(resp.headers));
+    obj.insert("body".into(), serde_json::json!(resp.body));
+    obj.insert("body_encoding".into(), serde_json::json!(resp.body_encoding));
+    if let Some(cache) = resp.cache {
+        obj.insert("cache".into(), serde_json::json!(cache));
+    }
+    serde_json::to_vec(&serde_json::Value::Object(obj))
+        .map_err(|e| format!("failed to encode response: {e}"))
+}
+
+fn unix_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 fn manifest() -> PluginManifest {
     PluginManifest {
         permissions: vec![
             "PERMISSION_NETWORK".into(),
             "PERMISSION_EVENT_PUBLISH".into(),
         ],
-        actions: vec!["http_request".into()],
+        actions: vec![
+            "http_request".into(),
+            "network_stats".into(),
+        ],
         ..Default::default()
     }
 }
@@ -459,10 +659,16 @@ impl ConcurrentHandler for NetworkPlugin {
     }
 
     fn accept(&self, req: &ActionRequest) -> Result<(), String> {
+        if req.action == "network_stats" {
+            return Ok(()); // does not use the network — never cap-gated
+        }
         self.inflight.check(&req.caller_plugin_id)
     }
 
     async fn on_action(&self, req: ActionRequest) -> Vec<Envelope> {
+        if req.action == "network_stats" {
+            return vec![response_envelope(req.action_id, Ok(self.network_stats_json()))];
+        }
         if req.action != "http_request" {
             return vec![response_envelope(
                 req.action_id,
@@ -480,7 +686,9 @@ impl ConcurrentHandler for NetworkPlugin {
                 return vec![response_envelope(req.action_id, Err(error))];
             }
         };
-        let outcome = self.handle_http_request(&req.params_json).await;
+        let outcome = self
+            .handle_http_request(&req.caller_plugin_id, &req.params_json)
+            .await;
         let event = event_envelope(&outcome);
         let envelope = response_envelope(req.action_id, outcome.response);
         // Best-effort, sent only after the response so the reply never
@@ -562,6 +770,9 @@ mod tests {
             extra_blocklist,
             allowlist,
             inflight: Inflight::new(max_inflight_per_caller),
+            stats: Mutex::new(HashMap::new()),
+            cache: Mutex::new(network_plugin::handler::CacheStore::new()),
+            jars: Mutex::new(HashMap::new()),
         })
     }
 
@@ -819,7 +1030,7 @@ mod tests {
             "max_redirects": 1,
         })
         .to_string();
-        let out = plugin.handle_http_request(capped.as_bytes()).await.response.unwrap();
+        let out = plugin.handle_http_request("caller_a", capped.as_bytes()).await.response.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(v["status"], 302, "one hop allowed: stops at B's 3xx");
 
@@ -830,7 +1041,7 @@ mod tests {
             "max_redirects": 2,
         })
         .to_string();
-        let out = plugin.handle_http_request(full.as_bytes()).await.response.unwrap();
+        let out = plugin.handle_http_request("caller_a", full.as_bytes()).await.response.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
         assert_eq!(v["status"], 200, "two hops allowed: reaches C");
         assert_eq!(v["body"], "ok");
@@ -985,5 +1196,195 @@ mod tests {
             .expect("run_concurrent_loop did not exit after PluginShutdown")
             .unwrap()
             .unwrap();
+    }
+
+    /// Serves `response` to every connection, counting them. Returns the URL
+    /// and the shared connection counter.
+    async fn counting_mock_server(response: &'static str) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_clone = hits.clone();
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = match listener.accept().await {
+                    Ok(conn) => conn,
+                    Err(_) => break,
+                };
+                hits_clone.fetch_add(1, Ordering::SeqCst);
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 1024];
+                    let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buf).await;
+                    let _ = tokio::io::AsyncWriteExt::write_all(&mut socket, response.as_bytes()).await;
+                });
+            }
+        });
+        (format!("http://{addr}/"), hits)
+    }
+
+    #[tokio::test]
+    async fn gzip_response_is_decompressed() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(b"decompressed hello").unwrap();
+        let gzipped = encoder.finish().unwrap();
+        let mut response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-encoding: gzip\r\ncontent-length: {}\r\n\r\n",
+            gzipped.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(&gzipped);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buf).await;
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut socket, &response).await;
+        });
+        let params = serde_json::json!({"method": "GET", "url": format!("http://{addr}/")}).to_string();
+        let plugin = test_plugin();
+        let out = plugin.handle_http_request("caller_a", params.as_bytes()).await.response.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["status"], 200);
+        assert_eq!(v["body"], "decompressed hello");
+    }
+
+    #[tokio::test]
+    async fn cache_serves_repeat_request_without_second_server_hit() {
+        use std::sync::atomic::Ordering;
+        let plugin = test_plugin();
+        let (url, hits) = counting_mock_server("HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\nhello").await;
+        let params = serde_json::json!({
+            "method": "GET", "url": url, "cache_ttl_ms": 60_000
+        })
+        .to_string();
+
+        let first = plugin.handle_http_request("caller_a", params.as_bytes()).await.response.unwrap();
+        let v1: serde_json::Value = serde_json::from_slice(&first).unwrap();
+        assert_eq!(v1["status"], 200);
+        assert_eq!(v1["cache"], "miss");
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+
+        let second = plugin.handle_http_request("caller_a", params.as_bytes()).await.response.unwrap();
+        let v2: serde_json::Value = serde_json::from_slice(&second).unwrap();
+        assert_eq!(v2["cache"], "hit");
+        assert_eq!(v2["body"], "hello");
+        assert_eq!(hits.load(Ordering::SeqCst), 1, "cache hit must not touch the server again");
+    }
+
+    #[tokio::test]
+    async fn cache_is_per_caller() {
+        use std::sync::atomic::Ordering;
+        let plugin = test_plugin();
+        let (url, hits) = counting_mock_server("HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\nhello").await;
+        let params = serde_json::json!({
+            "method": "GET", "url": url, "cache_ttl_ms": 60_000
+        })
+        .to_string();
+
+        plugin.handle_http_request("caller_a", params.as_bytes()).await;
+        let out = plugin.handle_http_request("caller_b", params.as_bytes()).await.response.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["cache"], "miss", "caller B must not see caller A's cached data");
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn non_2xx_response_is_not_cached() {
+        use std::sync::atomic::Ordering;
+        let plugin = test_plugin();
+        let (url, hits) = counting_mock_server("HTTP/1.1 500 Server Error\r\ncontent-length: 0\r\n\r\n").await;
+        let params = serde_json::json!({
+            "method": "GET", "url": url, "cache_ttl_ms": 60_000
+        })
+        .to_string();
+
+        plugin.handle_http_request("caller_a", params.as_bytes()).await;
+        let out = plugin.handle_http_request("caller_a", params.as_bytes()).await.response.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["cache"], "miss", "5xx must not be cached — second request is a miss");
+        assert_eq!(hits.load(Ordering::SeqCst), 2, "server hit twice — nothing cached");
+    }
+
+    #[tokio::test]
+    async fn stats_track_per_caller_requests_errors_and_latency() {
+        let plugin = test_plugin();
+        let (url, _) = counting_mock_server("HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\nhello").await;
+        let ok_params = serde_json::json!({"method": "GET", "url": url}).to_string();
+        plugin.handle_http_request("caller_a", ok_params.as_bytes()).await;
+        plugin.handle_http_request("caller_a", ok_params.as_bytes()).await;
+
+        let (err_url, _) = counting_mock_server("HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n").await;
+        let err_params = serde_json::json!({"method": "GET", "url": err_url}).to_string();
+        plugin.handle_http_request("caller_a", err_params.as_bytes()).await;
+
+        let stats = plugin.stats.lock().unwrap();
+        let a = &stats["caller_a"];
+        assert_eq!(a.requests, 3);
+        assert_eq!(a.errors, 1, "404 counts as an error");
+    }
+
+    #[tokio::test]
+    async fn network_stats_aggregates_totals_and_per_caller() {
+        let plugin = test_plugin();
+        let (url, _) = counting_mock_server("HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\nhello").await;
+        let params = serde_json::json!({"method": "GET", "url": url}).to_string();
+        plugin.handle_http_request("caller_a", params.as_bytes()).await;
+        plugin.handle_http_request("caller_b", params.as_bytes()).await;
+
+        let data = plugin.network_stats_json();
+        let v: serde_json::Value = serde_json::from_slice(&data).unwrap();
+        assert_eq!(v["totals"]["requests"], 2);
+        assert_eq!(v["totals"]["errors"], 0);
+        assert_eq!(v["per_caller"]["caller_a"]["requests"], 1);
+        assert_eq!(v["per_caller"]["caller_b"]["requests"], 1);
+        assert!(
+            v["per_caller"]["caller_a"]["avg_latency_ms"].is_number(),
+            "avg_latency_ms key present and numeric"
+        );
+    }
+
+    #[tokio::test]
+    async fn cookie_jar_roundtrips_set_cookie_to_followup_request() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen = Arc::new(Mutex::new(String::new()));
+        let seen_clone = seen.clone();
+        tokio::spawn(async move {
+            for (i, response) in [
+                "HTTP/1.1 200 OK\r\nset-cookie: session=abc123; Path=/\r\ncontent-length: 2\r\n\r\nok",
+                "HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nok",
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buf = [0u8; 2048];
+                let n = tokio::io::AsyncReadExt::read(&mut socket, &mut buf).await.unwrap();
+                let request = String::from_utf8_lossy(&buf[..n]).to_string();
+                if i == 1 {
+                    *seen_clone.lock().unwrap() = request;
+                }
+                let _ = tokio::io::AsyncWriteExt::write_all(&mut socket, response.as_bytes()).await;
+            }
+        });
+
+        let plugin = test_plugin();
+        let url = format!("http://{addr}/");
+        let p1 = serde_json::json!({"method": "GET", "url": url, "use_cookies": true}).to_string();
+        plugin.handle_http_request("caller_a", p1.as_bytes()).await;
+        let p2 = serde_json::json!({"method": "GET", "url": url, "use_cookies": true}).to_string();
+        plugin.handle_http_request("caller_a", p2.as_bytes()).await;
+
+        let second_request = seen.lock().unwrap().clone();
+        assert!(
+            second_request.to_lowercase().contains("cookie: session=abc123"),
+            "second request carries the jar cookie: {second_request}"
+        );
     }
 }
