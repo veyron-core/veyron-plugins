@@ -1,17 +1,17 @@
 # Example kernel config.yaml entry for the `ai` plugin.
 # Copy this block into the top-level `plugins:` list of the kernel's
-# config.yaml (see repo root config.yaml for the full schema).
+# config.yaml (see repo root config.yaml for the full schema), or into a
+# `plugins.d/ai.yaml` drop-in.
 #
-# `ai` declares zero kernel permissions (see ROADMAP.md, "Decision: reuse
-# `network`, don't reinvent") — it calls out through the `network` plugin's
-# `http_request` action instead of opening its own sockets. So `network`
-# must also be registered and running for `ai` to do anything.
+# `ai` declares zero kernel permissions of its own (see ROADMAP.md) — it
+# calls out through the `network` plugin's `http_request` action instead of
+# opening its own sockets. So `network` must also be registered and running
+# for `ai` to do anything.
 #
-# `ai` does not read a config file itself — the only "configuration" is
-# whatever env vars are listed here, read at call time via the
-# `api_key_env` field a caller passes in each `chat_completion` request
-# (see src/handler.rs). Set one var per provider/account you want callers
-# to be able to reference by name.
+# v0.3: `ai` keeps a SQLite store (`<kernel data_dir>/plugins/ai/ai.db`)
+# with declared + auto-discovered models, agent profiles, and per-call token
+# usage. The kernel grants plugins a writable data dir automatically
+# (`VEYRON_DATA_DIR`) — no extra config needed.
 
 plugins:
   - id: ai
@@ -27,23 +27,48 @@ plugins:
       # key) and get its value sent straight into an outbound request
       # header to a caller-controlled base_url.
       - AI_PLUGIN_ALLOWED_KEY_ENVS=ANTHROPIC_API_KEY,OPENAI_API_KEY,OLLAMA_API_KEY
-      # Anthropic Messages API key. Callers reference this by name via
-      # "api_key_env": "ANTHROPIC_API_KEY" in their chat_completion request.
+
+      # Optional: models declared by hand, as a JSON array. Required for
+      # providers with no discovery API (Anthropic). Models pulled by
+      # AI_PLUGIN_DISCOVERY are stored automatically and need no entry here.
+      - AI_PLUGIN_MODELS=[{"id":"claude-sonnet-5","provider":"anthropic","api_key_env":"ANTHROPIC_API_KEY","is_default":true}]
+
+      # Optional: named agent profiles (conversation personas), JSON array.
+      # Each agent pins a model + system prompt; clients call them by id.
+      - AI_PLUGIN_AGENTS=[{"id":"code","name":"Coder","model_id":"qwen2.5-coder","system_prompt":"Write only code, no prose.","goal":"Assist with programming","description":"Code-focused assistant","is_default":true}]
+
+      # Optional: sources whose model lists are pulled automatically on
+      # startup and via the `refresh_models` action. ollama: GET /api/tags;
+      # openai: GET /models (Bearer key when api_key_env resolves non-empty).
+      - AI_PLUGIN_DISCOVERY=[{"provider":"ollama","base_url":"http://localhost:11434"}]
+
+      # Provider keys. Callers reference these by name via "api_key_env"
+      # in their chat_completion request; the key itself never leaves the
+      # host. Local Ollama needs no key — the openai-compatible adapter
+      # omits the Authorization header when the resolved value is empty.
+      #
+      # Resolution order is vault-first: at call time `ai` asks the
+      # `secrets` plugin's vault for the key under the same name (its
+      # `secret_get` action), and only falls back to these env vars when
+      # the vault has no non-empty value. The vault wins when both exist.
+      # To store a key in the vault instead of an env var, have the
+      # operator run (via the web UI or another plugin):
+      #
+      #   secret_set {"name":"ANTHROPIC_API_KEY","value":"sk-ant-..."}
+      #   secret_set {"name":"OPENAI_API_KEY","value":"sk-..."}
+      #
+      # (the `secrets` plugin must be registered; `ai` declares the
+      # `secrets` permission for this). Keys stored only in the vault may
+      # be dropped from this `env:` list entirely, but the names still
+      # need no entry here — the allowlist above gates the handle either
+      # way.
       - ANTHROPIC_API_KEY=sk-ant-...
-      # OpenAI (or OpenAI-compatible: OpenRouter, self-hosted gateways) key.
       - OPENAI_API_KEY=sk-...
-      # OpenRouter also speaks the openai-compatible shape; give it its own
-      # var if you want callers to pick a specific account/key by name.
-      # - OPENROUTER_API_KEY=sk-or-...
-      # Local Ollama needs no auth — point base_url at it in the request
-      # ("base_url": "http://localhost:11434/v1") and set api_key_env to any
-      # unset/empty var name; the openai-compatible adapter omits the
-      # Authorization header entirely when the resolved key is empty.
-      # Also requires network's own config: loopback is blocked by its
-      # built-in SSRF ranges, so its `env:` needs
-      # NETWORK_PLUGIN_ALLOWED_HOSTS=localhost,127.0.0.1 (see
-      # plugins/network/config.example.yaml) or the request fails.
-      # - OLLAMA_API_KEY=
+      - OLLAMA_API_KEY=
+
+      # network must be allowed to reach local model endpoints (its SSRF
+      # blocklist rejects loopback by default):
+      # - NETWORK_PLUGIN_ALLOWED_HOSTS=localhost,127.0.0.1
     grace_seconds: 10
     max_procs: 64
     max_vmem_mb: 512

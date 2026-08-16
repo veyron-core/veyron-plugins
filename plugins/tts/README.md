@@ -25,13 +25,16 @@ examples, every error message a caller can hit, and common patterns.
 
 ## Operator note
 
-`tts` declares two kernel permissions — `network` and `audio_stream`
-(`plugin.json`: `"permissions": ["network", "PERMISSION_AUDIO_STREAM"]`).
+`tts` declares three kernel permissions — `network`, `audio_stream`, and
+`secrets` (`plugin.json`: `"permissions": ["network",
+"PERMISSION_AUDIO_STREAM", "PERMISSION_IPC_SEND", "secrets"]`).
 `network` because its cloud providers invoke the `network` plugin's gated
 `http_request` action, and the kernel's anti-laundering check (T-19)
 requires callers of a gated action to hold its permission too (Manifest
 v2). `audio_stream` because `tts_speak` streams `AudioStreamChunk`s to a
-peer (proto v1.6 `PERMISSION_AUDIO_STREAM`). It opens no sockets itself,
+peer (proto v1.6 `PERMISSION_AUDIO_STREAM`). `secrets` because cloud
+providers resolve their API keys from the `secrets` plugin's vault first
+(gated `secret_get`; T-19 again). It opens no sockets itself,
 so it's safe to run with `sandbox: true`. `network` still needs
 `sandbox: false` (real egress) for the cloud providers — see
 `plugins/network/README.md`.
@@ -59,10 +62,11 @@ Request (`ActionRequest.params_json`):
 - `voice` — required. `sherpa`: Kokoro name (`af_heart`, ...) or `sid:N`;
   `openai`: one of the documented voice ids; `elevenlabs`: your account's
   voice id.
-- `api_key_env` — required for cloud providers (name of an env var the
-  `tts` process reads at call time, never a literal key; must be on the
-  operator's `TTS_PLUGIN_ALLOWED_KEY_ENVS` allowlist). Ignored for
-  `sherpa`.
+- `api_key_env` — required for cloud providers. The env-var-style name is
+  a lookup handle, never a literal key: `tts` reads it from the `secrets`
+  plugin's vault first (under that exact name), then falls back to the
+  process environment. Must be on the operator's
+  `TTS_PLUGIN_ALLOWED_KEY_ENVS` allowlist. Ignored for `sherpa`.
 - `format` — optional. `sherpa`: `wav` (default) | `pcm`;
   `openai`: `mp3` (default) | `wav` | `pcm`; `elevenlabs`: `mp3` (default) | `pcm`.
 - `speed` — optional, `0.25`..=`4.0`, default `1.0`.
@@ -138,9 +142,10 @@ Requires `PERMISSION_AUDIO_STREAM`.
 
 ## Configuration
 
-`tts` reads no config file itself — everything is environment variables
+`tts` reads no config file itself — settings are environment variables
 set in the kernel's `config.yaml`, under this plugin's `env:` list — see
-`config.example.yaml` in this directory.
+`config.example.yaml` in this directory. Provider API keys may also be
+stored in the `secrets` plugin's vault instead (see below).
 
 - `TTS_PLUGIN_ALLOWED_KEY_ENVS` — **required for cloud providers**: a
   comma-separated, exact-match allowlist of every env var name a caller's
@@ -149,6 +154,13 @@ set in the kernel's `config.yaml`, under this plugin's `env:` list — see
   `AI_PLUGIN_ALLOWED_KEY_ENVS`: without the allowlist a caller could name
   *any* env var the `tts` process has and have its value sent straight into
   an outbound request header to a caller-controlled `base_url`.
+- **Provider API keys** — resolved secrets-first at call time, never baked
+  into the request: `tts` asks the `secrets` plugin's vault
+  (`secret_get`) for the key under the `api_key_env` name, then falls
+  back to a process env var of that name (see `config.example.yaml`).
+  The vault wins when both hold a value; a missing vault is logged and
+  the env fallback is used. The `secrets` plugin must be registered for
+  the vault hop.
 - `TTS_PLUGIN_LOCAL_MODEL_DIR` — **required for `sherpa`**: directory with
   the ONNX model files.
 - `TTS_PLUGIN_LOCAL_MODEL_TYPE` — **required for `sherpa`**: `kokoro` or

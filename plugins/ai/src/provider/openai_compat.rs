@@ -13,11 +13,14 @@ impl Provider for OpenAiCompatProvider {
     fn build_http_request(&self, params: &ChatCompletionParams, api_key: &str) -> HttpRequestJson {
         let url = format!("{}/chat/completions", params.base_url.trim_end_matches('/'));
 
-        let messages: Vec<serde_json::Value> = params
+        let mut messages: Vec<serde_json::Value> = params
             .messages
             .iter()
             .map(|m| serde_json::json!({"role": m.role, "content": m.content}))
             .collect();
+        if let Some(system) = params.system_prompt.as_deref().filter(|s| !s.is_empty()) {
+            messages.insert(0, serde_json::json!({"role": "system", "content": system}));
+        }
 
         let body = serde_json::json!({
             "model": params.model,
@@ -106,14 +109,20 @@ mod tests {
             }],
             max_tokens: 1024,
             timeout_ms: 30_000,
+            agent_id: None,
+            system_prompt: None,
         }
     }
 
     #[test]
     fn builds_request_with_bearer_auth() {
-        let req = OpenAiCompatProvider.build_http_request(&params("https://api.openai.com/v1"), "sk-secret");
+        let req = OpenAiCompatProvider
+            .build_http_request(&params("https://api.openai.com/v1"), "sk-secret");
         assert_eq!(req.url, "https://api.openai.com/v1/chat/completions");
-        assert_eq!(req.headers.get("Authorization").unwrap(), "Bearer sk-secret");
+        assert_eq!(
+            req.headers.get("Authorization").unwrap(),
+            "Bearer sk-secret"
+        );
     }
 
     #[test]
@@ -124,7 +133,8 @@ mod tests {
 
     #[test]
     fn strips_trailing_slash_from_base_url() {
-        let req = OpenAiCompatProvider.build_http_request(&params("https://openrouter.ai/api/v1/"), "k");
+        let req =
+            OpenAiCompatProvider.build_http_request(&params("https://openrouter.ai/api/v1/"), "k");
         assert_eq!(req.url, "https://openrouter.ai/api/v1/chat/completions");
     }
 
@@ -135,7 +145,9 @@ mod tests {
             "usage": {"prompt_tokens": 4, "completion_tokens": 2}
         })
         .to_string();
-        let result = OpenAiCompatProvider.parse_response(body.as_bytes()).unwrap();
+        let result = OpenAiCompatProvider
+            .parse_response(body.as_bytes())
+            .unwrap();
         assert_eq!(result.content, "hello");
         assert_eq!(result.stop_reason, "stop");
         assert_eq!(result.usage.input_tokens, 4);
@@ -145,13 +157,17 @@ mod tests {
     #[test]
     fn rejects_response_with_no_choices() {
         let body = serde_json::json!({"choices": []}).to_string();
-        let err = OpenAiCompatProvider.parse_response(body.as_bytes()).unwrap_err();
+        let err = OpenAiCompatProvider
+            .parse_response(body.as_bytes())
+            .unwrap_err();
         assert!(err.contains("no choices"), "error was: {err}");
     }
 
     #[test]
     fn rejects_malformed_json() {
-        let err = OpenAiCompatProvider.parse_response(b"not json").unwrap_err();
+        let err = OpenAiCompatProvider
+            .parse_response(b"not json")
+            .unwrap_err();
         assert!(err.contains("malformed"), "error was: {err}");
     }
 }

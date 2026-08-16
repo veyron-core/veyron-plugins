@@ -16,9 +16,13 @@ shared/default namespace.
 | Action | Params | Result |
 |---|---|---|
 | `db_get` | `{key}` | `{found, value}` |
-| `db_set` | `{key, value}` | `{ok: true}` |
+| `db_set` | `{key, value, ttl_ms?}` | `{ok: true}` |
 | `db_delete` | `{key}` | `{deleted}` |
 | `db_batch_get` | `{keys: [..]}` | `{values: {key: value, ..}}` (missing keys map to `null`) |
+| `db_incr` | `{key, delta?}` | `{ok, value}` |
+| `db_keys` | `{prefix?}` | `{keys: [..]}` |
+| `db_append` | `{key, value}` | `{ok, length}` |
+| `db_patch` | `{key, path, value}` | `{ok, value}` |
 | `db_query` | `{sql, params: [..]}` | `{rows: [..], rows_affected}` |
 
 `db_query` runs against the caller's own database file only — `ATTACH` is
@@ -36,6 +40,33 @@ that JSON text verbatim (a stored string comes back quoted, e.g. `"bar"`).
 every error message a caller can hit, column/param type mapping, and common
 patterns (building your own tables, transactions, TTL, recovering from a full
 quota).
+
+## KV TTL
+
+`db_set` accepts an optional `ttl_ms`: the key expires that many milliseconds
+after the set (`0`/negative = no expiry, same as omitting it). Expiry is
+enforced two ways: an `expires_at` column (added by an idempotent schema
+migration to `.db` files created before v0.3), swept with a `DELETE` before
+**every** action — including raw `db_query` — plus expiry filters on the KV
+accessors (`db_get`, `db_batch_get`) so an expired key reads as missing even
+if the sweep hasn't run. The `expires_at` column is visible to raw SQL.
+
+## Change events
+
+Every mutation — `db_set`, `db_delete` (only when a row was actually
+deleted), `db_incr`, `db_append`, `db_patch` — publishes a best-effort
+`plugin.database.changed` event to the kernel event bus (the kernel prepends
+the `plugin.<sender_id>.` namespace). The payload is one JSON object:
+
+```json
+{"caller": "notes", "action": "db_set", "key": "user:42"}
+```
+
+Reads (`db_get`, `db_batch_get`, `db_keys`, `db_query`) publish nothing.
+Publishing is fire-and-forget, same as `network.request_completed`: the
+`ActionResponse` is always sent first, and a dropped event never delays or
+fails the caller's reply. Requires `PERMISSION_EVENT_PUBLISH`, which the
+manifest declares.
 
 ## Config
 

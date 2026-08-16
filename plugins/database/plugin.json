@@ -1,7 +1,7 @@
 {
   "plugin_id": "database",
   "version": "0.2.0",
-  "permissions": ["PERMISSION_STORAGE"],
+  "permissions": ["PERMISSION_STORAGE", "event_publish"],
   "kernel_compatibility_range": {
     "min": "0.1.0",
     "max": "*"
@@ -38,7 +38,8 @@
         "type": "object",
         "properties": {
           "key": { "type": "string" },
-          "value": { "description": "Arbitrary JSON value; stored as JSON text, capped at DATABASE_PLUGIN_MAX_VALUE_BYTES." }
+          "value": { "description": "Arbitrary JSON value; stored as JSON text, capped at DATABASE_PLUGIN_MAX_VALUE_BYTES." },
+          "ttl_ms": { "type": "integer", "description": "Expire the key this many ms after set; absent = no expiry." }
         },
         "required": ["key", "value"],
         "additionalProperties": false
@@ -124,6 +125,95 @@
           "rows_affected": { "type": "integer" }
         },
         "required": ["rows", "rows_affected"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "db_incr",
+      "permission": "storage",
+      "input": {
+        "type": "object",
+        "properties": {
+          "key": { "type": "string" },
+          "delta": { "type": "integer", "default": 1, "description": "negative decrements" }
+        },
+        "required": ["key"],
+        "additionalProperties": false
+      },
+      "output": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean" },
+          "value": { "type": "integer" }
+        },
+        "required": ["ok", "value"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "db_keys",
+      "permission": "storage",
+      "input": {
+        "type": "object",
+        "properties": {
+          "prefix": { "type": "string", "default": "", "description": "only keys starting with this" }
+        },
+        "additionalProperties": false
+      },
+      "output": {
+        "type": "object",
+        "properties": {
+          "keys": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        },
+        "required": ["keys"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "db_append",
+      "permission": "storage",
+      "input": {
+        "type": "object",
+        "properties": {
+          "key": { "type": "string" },
+          "value": { "description": "Arbitrary JSON value appended to the array stored at key." }
+        },
+        "required": ["key", "value"],
+        "additionalProperties": false
+      },
+      "output": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean" },
+          "length": { "type": "integer" }
+        },
+        "required": ["ok", "length"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "db_patch",
+      "permission": "storage",
+      "input": {
+        "type": "object",
+        "properties": {
+          "key": { "type": "string" },
+          "path": { "type": "string", "description": "SQLite JSON path, e.g. $.a.b or $[0]" },
+          "value": { "description": "Arbitrary JSON value to set at the path." }
+        },
+        "required": ["key", "path", "value"],
+        "additionalProperties": false
+      },
+      "output": {
+        "type": "object",
+        "properties": {
+          "ok": { "type": "boolean" },
+          "value": { "description": "The full updated JSON value." }
+        },
+        "required": ["ok", "value"],
         "additionalProperties": false
       }
     }

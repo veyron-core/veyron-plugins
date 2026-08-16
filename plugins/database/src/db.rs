@@ -5,6 +5,17 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use tokio::sync::Mutex;
 
+/// Current unix time in milliseconds (the same stamp `updated_at` uses).
+/// Saturates at `i64::MAX` rather than panicking on a clock before the
+/// epoch; a saturated stamp is harmless for both `updated_at` and the
+/// expiry sweep (it can only make a key look newer/alive, never expire it).
+pub fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
+
 pub struct DbConfig {
     pub data_dir: PathBuf,
     pub pool_size: u32,
@@ -30,7 +41,8 @@ const PAGE_SIZE: u32 = 4096;
 const KV_TABLE_DDL: &str = "create table if not exists kv (\
     key TEXT PRIMARY KEY, \
     value TEXT NOT NULL, \
-    updated_at INTEGER NOT NULL\
+    updated_at INTEGER NOT NULL, \
+    expires_at INTEGER\
 )";
 
 /// Caller ids are kernel-stamped plugin ids, never caller-controlled path
@@ -164,6 +176,22 @@ impl DbPools {
             .await
             .map_err(|e| format!("failed to init kv table for {caller_id}: {e}"))?;
 
+        // Migration for `.db` files created before v0.3 (which predate the
+        // `expires_at` column): add the column when it's missing. Idempotent —
+        // the pragma check makes this a no-op on files already migrated or
+        // freshly created by the DDL above.
+        let has_expires: (i64,) =
+            sqlx::query_as("select count(*) from pragma_table_info('kv') where name = 'expires_at'")
+                .fetch_one(&pool)
+                .await
+                .map_err(|e| format!("failed to check kv schema for {caller_id}: {e}"))?;
+        if has_expires.0 == 0 {
+            sqlx::query("alter table kv add column expires_at INTEGER")
+                .execute(&pool)
+                .await
+                .map_err(|e| format!("failed to migrate kv schema for {caller_id}: {e}"))?;
+        }
+
         // Re-lock only to insert. If another caller raced us and already
         // cached a pool for this caller_id, keep the winner's pool (both
         // are equally valid — same file, same DDL already applied) and let
@@ -176,6 +204,18 @@ impl DbPools {
             .clone();
         Ok(winner)
     }
+}
+
+/// Delete every kv row whose `expires_at` has passed (`<= now` — a row
+/// expiring exactly at `now` is already dead). Called by the handler before
+/// every action, so expired keys are gone before any accessor runs.
+pub async fn sweep_expired(pool: &SqlitePool) -> Result<(), String> {
+    sqlx::query("delete from kv where expires_at is not null and expires_at <= ?1")
+        .bind(now_ms())
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[cfg(test)]

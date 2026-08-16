@@ -238,3 +238,37 @@ from your side are serviced one after another.
 
 **What about tool-use / function calling?** Not in v1 — it's a planned v2
 passthrough (see ROADMAP non-goals).
+
+## v0.3 — models, agents, analytics
+
+Since v0.3 the plugin keeps a SQLite store (`<kernel data_dir>/plugins/ai/ai.db`)
+with models, agent profiles and per-call token usage. The kernel grants the
+plugin a writable data dir automatically (`VEYRON_DATA_DIR`).
+
+**Model resolution.** `chat_completion` can name a **model id** or an
+**agent id** instead of the legacy provider/base_url/api_key_env triple. The
+plugin resolves the endpoint and key from its database, so a caller never
+sends provider details:
+
+```json
+{ "model": "llama3.2", "messages": [{"role": "user", "content": "hi"}] }
+{ "agent_id": "code", "messages": [{"role": "user", "content": "hi"}] }
+```
+
+Agent profiles carry a system prompt that the plugin injects (OpenAI:
+`system` message; Anthropic: top-level `system` field).
+
+**Other actions:**
+
+- `list_models` → `[{id, provider, base_url, api_key_env, is_default, discovered_at, last_seen}]`
+- `list_agents` → `[{id, name, model_id, system_prompt, goal, description, is_default}]`
+- `refresh_models` → pulls configured providers' model lists and upserts
+  them: `{discovered, updated, errors}`
+- `usage_stats` → `{totals, by_model, by_agent}` — each bucket has
+  `{requests, input_tokens, output_tokens}`
+
+**Configuration** (env, set in `plugins.d/ai.yaml`): `AI_PLUGIN_MODELS`
+(hand-declared models, required for Anthropic — no discovery API),
+`AI_PLUGIN_AGENTS` (agent profiles), `AI_PLUGIN_DISCOVERY`
+(`[{"provider":"ollama","base_url":"http://localhost:11434"}]` — ollama:
+`GET /api/tags`; openai: `GET /models`). See `config.example.yaml`.

@@ -28,6 +28,11 @@ plugins:
       # header to a caller-controlled base_url.
       - STT_PLUGIN_ALLOWED_KEY_ENVS=OPENAI_API_KEY
       # OpenAI API key. Callers reference it via "api_key_env": "OPENAI_API_KEY".
+      # Resolution is secrets-first: the key may instead live in the `stt`
+      # plugin's own `secrets` vault under this exact name, set once via
+      #   secret_set {"name": "OPENAI_API_KEY", "value": "sk-..."}
+      # The vault wins when both exist; this env var is the fallback (and
+      # the only option if the `secrets` plugin isn't running).
       - OPENAI_API_KEY=sk-...
       # --- Required for the local provider (sherpa) ------------------------
       # Directory holding the ONNX model files, and which model family it

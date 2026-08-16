@@ -75,6 +75,10 @@ pub struct HttpResponseJson {
     pub body: String,
     /// `"utf8"` or `"base64"`, telling the caller how to interpret `body`.
     pub body_encoding: &'static str,
+    /// `"hit"`/`"miss"` when the caller requested caching (`cache_ttl_ms`);
+    /// `None` when caching was not requested. Set by the plugin (main.rs),
+    /// not by the fetch path itself.
+    pub cache: Option<&'static str>,
 }
 
 /// DNS resolver that filters out any IP blocked by [`ssrf::is_blocked_ip`].
@@ -184,6 +188,12 @@ pub struct FetchStats {
 pub struct FetchOutcome {
     pub response: Result<HttpResponseJson, String>,
     pub stats: FetchStats,
+    /// First `name=value` pair of every `Set-Cookie` header on the final
+    /// attempt's response, when the caller requested cookies
+    /// (`use_cookies`); empty otherwise. The plugin (main.rs) merges these
+    /// into the caller's jar after the fetch — never logged, never returned
+    /// to the caller in the action response.
+    pub set_cookies: Vec<(String, String)>,
 }
 
 /// Send the HTTP request and map the response, retrying transient failures
@@ -198,7 +208,7 @@ pub async fn fetch(
     client: &reqwest::Client,
     params: &HttpRequestParams,
 ) -> Result<HttpResponseJson, String> {
-    fetch_with_stats(client, params).await.response
+    fetch_with_stats(client, params, None, false).await.response
 }
 
 /// [`fetch`] plus the [`FetchStats`] the attempt series accumulated, for
@@ -208,9 +218,16 @@ pub async fn fetch(
 /// over [`MAX_BODY_BYTES`], a redirect hop rejected by the client's
 /// redirect policy — fail on the first attempt regardless of
 /// `max_retries`, since retrying reproduces them exactly.
+///
+/// `attach_cookies` is a snapshot of the caller's session-cookie jar for
+/// the request host (attached only when the caller sent no `Cookie` header
+/// itself); `use_cookies` also collects `Set-Cookie` pairs from the
+/// response into [`FetchOutcome::set_cookies`].
 pub async fn fetch_with_stats(
     client: &reqwest::Client,
     params: &HttpRequestParams,
+    attach_cookies: Option<&[(String, String)]>,
+    use_cookies: bool,
 ) -> FetchOutcome {
     let host = reqwest::Url::parse(&params.url)
         .ok()
@@ -219,12 +236,16 @@ pub async fn fetch_with_stats(
     let started = std::time::Instant::now();
     let mut backoff_ms = params.retry_backoff_ms;
     let mut attempt = 0;
+    let mut set_cookies = Vec::new();
 
     loop {
-        let result = fetch_once(client, params).await;
+        let result = fetch_once(client, params, attach_cookies, use_cookies).await;
+        if let Ok((_, cookies)) = &result {
+            set_cookies = cookies.clone();
+        }
         let retry = attempt < params.max_retries
             && match &result {
-                Ok(resp) => is_retryable_status(resp.status),
+                Ok((resp, _)) => is_retryable_status(resp.status),
                 Err(e) => e.retryable,
             };
 
@@ -235,7 +256,7 @@ pub async fn fetch_with_stats(
             "method": params.method,
             "host": host,
             "attempt": attempt + 1,
-            "status": result.as_ref().ok().map(|r| r.status),
+            "status": result.as_ref().ok().map(|(r, _)| r.status),
             "error": result.as_ref().err().map(|e| e.message.as_str()),
             "duration_ms": started.elapsed().as_millis(),
         });
@@ -243,10 +264,11 @@ pub async fn fetch_with_stats(
 
         if !retry {
             return FetchOutcome {
-                response: result.map_err(|e| e.message),
+                response: result.map(|(r, _)| r).map_err(|e| e.message),
                 stats: FetchStats {
                     attempts: attempt + 1,
                 },
+                set_cookies,
             };
         }
         tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
@@ -258,7 +280,9 @@ pub async fn fetch_with_stats(
 async fn fetch_once(
     client: &reqwest::Client,
     params: &HttpRequestParams,
-) -> Result<HttpResponseJson, FetchError> {
+    attach_cookies: Option<&[(String, String)]>,
+    use_cookies: bool,
+) -> Result<(HttpResponseJson, Vec<(String, String)>), FetchError> {
     let method = reqwest::Method::from_bytes(params.method.as_bytes())
         .map_err(|e| FetchError::deterministic(format!("invalid method: {e}")))?;
 
@@ -266,27 +290,69 @@ async fn fetch_once(
         .request(method, &params.url)
         .timeout(Duration::from_millis(params.timeout_ms));
 
+    // Multipart bodies override the caller's Content-Type, so build the
+    // body first and skip the caller's content-type header below.
+    let multipart: Option<(String, Vec<u8>)> = match &params.multipart {
+        Some(parts) => {
+            if params.body.is_some() || params.body_base64.is_some() {
+                return Err(FetchError::deterministic(
+                    "multipart is mutually exclusive with body and body_base64".to_string(),
+                ));
+            }
+            let boundary = multipart_boundary();
+            let body =
+                build_multipart_body(parts, &boundary).map_err(FetchError::deterministic)?;
+            Some((boundary, body))
+        }
+        None => None,
+    };
+
     for (k, v) in &params.headers {
+        if multipart.is_some() && k.eq_ignore_ascii_case("content-type") {
+            continue;
+        }
         req = req.header(k, v);
     }
-    let body_bytes: Option<Vec<u8>> = match (&params.body, &params.body_base64) {
-        (Some(_), Some(_)) => {
-            return Err(FetchError::deterministic(
-                "set body or body_base64, not both".to_string(),
-            ))
+
+    let body_bytes: Option<Vec<u8>> = if let Some((boundary, body)) = multipart {
+        req = req.header(
+            reqwest::header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={boundary}"),
+        );
+        Some(body)
+    } else {
+        match (&params.body, &params.body_base64) {
+            (Some(_), Some(_)) => {
+                return Err(FetchError::deterministic(
+                    "set body or body_base64, not both".to_string(),
+                ))
+            }
+            (Some(text), None) => Some(text.clone().into_bytes()),
+            (None, Some(b64)) => {
+                use base64::Engine;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(b64)
+                    .map_err(|e| FetchError::deterministic(format!("invalid body_base64: {e}")))?;
+                Some(bytes)
+            }
+            (None, None) => None,
         }
-        (Some(text), None) => Some(text.clone().into_bytes()),
-        (None, Some(b64)) => {
-            use base64::Engine;
-            let bytes = base64::engine::general_purpose::STANDARD
-                .decode(b64)
-                .map_err(|e| FetchError::deterministic(format!("invalid body_base64: {e}")))?;
-            Some(bytes)
-        }
-        (None, None) => None,
     };
     if let Some(bytes) = body_bytes {
         req = req.body(bytes);
+    }
+
+    // Session cookies (opt-in): the caller's own `Cookie` header wins over
+    // the jar; a jar snapshot is attached only when the caller sent none.
+    let attach = if use_cookies
+        && params.headers.keys().all(|k| !k.eq_ignore_ascii_case("cookie"))
+    {
+        attach_cookies.and_then(cookie_header)
+    } else {
+        None
+    };
+    if let Some(cookie) = attach {
+        req = req.header(reqwest::header::COOKIE, cookie);
     }
 
     let mut resp = req.send().await.map_err(|e| {
@@ -304,6 +370,19 @@ async fn fetch_once(
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or_default().to_string()))
         .collect();
+
+    // Collect every `Set-Cookie` header on the final response before the
+    // header map collapses same-named headers.
+    let set_cookies = if use_cookies {
+        resp.headers()
+            .get_all(reqwest::header::SET_COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .filter_map(parse_set_cookie)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
 
     let mut body_bytes = Vec::new();
     while let Some(chunk) = resp
@@ -330,12 +409,227 @@ async fn fetch_once(
         }
     };
 
-    Ok(HttpResponseJson {
-        status,
-        headers,
-        body,
-        body_encoding,
-    })
+    Ok((
+        HttpResponseJson {
+            status,
+            headers,
+            body,
+            body_encoding,
+            cache: None,
+        },
+        set_cookies,
+    ))
+}
+
+/// Generate a `multipart/form-data` boundary: a fixed dash prefix plus hex
+/// from the current timestamp and process id. Uniqueness across requests is
+/// all that matters here, not unpredictability.
+pub fn multipart_boundary() -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("------------------------{nanos:x}{:x}", std::process::id())
+}
+
+/// Build the `multipart/form-data` wire body for `parts` under `boundary`.
+/// Each part becomes a `Content-Disposition: form-data; name=...` block
+/// with an optional `filename`, an explicit or defaulted `Content-Type`,
+/// then the data. `"` in names/filenames is replaced with `'` and CR/LF are
+/// stripped so no part can break out of the framing (no shell is involved —
+/// this is pure byte framing).
+pub fn build_multipart_body(
+    parts: &[crate::request::MultipartPart],
+    boundary: &str,
+) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    for part in parts {
+        out.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+        out.extend_from_slice(
+            format!(
+                "Content-Disposition: form-data; name=\"{}\"",
+                sanitize_part_token(&part.name)
+            )
+            .as_bytes(),
+        );
+        if let Some(filename) = &part.filename {
+            out.extend_from_slice(
+                format!("; filename=\"{}\"", sanitize_part_token(filename)).as_bytes(),
+            );
+        }
+        let (default_ct, data) = match (&part.value, &part.file_base64) {
+            (Some(v), None) => ("text/plain; charset=utf-8", v.clone().into_bytes()),
+            (None, Some(b64)) => {
+                use base64::Engine;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(b64)
+                    .map_err(|e| format!("invalid multipart file_base64: {e}"))?;
+                ("application/octet-stream", bytes)
+            }
+            _ => {
+                return Err(
+                    "each multipart part needs exactly one of value or file_base64".to_string(),
+                )
+            }
+        };
+        let content_type = part.content_type.as_deref().unwrap_or(default_ct);
+        out.extend_from_slice(format!("\r\nContent-Type: {content_type}\r\n\r\n").as_bytes());
+        out.extend_from_slice(&data);
+        out.extend_from_slice(b"\r\n");
+    }
+    out.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    Ok(out)
+}
+
+fn sanitize_part_token(s: &str) -> String {
+    s.chars()
+        .filter(|c| *c != '\r' && *c != '\n')
+        .map(|c| if c == '"' { '\'' } else { c })
+        .collect()
+}
+
+/// Parse the first `name=value` pair of a `Set-Cookie` header, skipping
+/// attributes (`Path=...`, `Expires=...`, ...). Control characters are
+/// stripped from both name and value so a hostile server cannot inject
+/// header framing into the jar. Malformed headers (no `=`) yield `None`.
+pub fn parse_set_cookie(header: &str) -> Option<(String, String)> {
+    let pair = header.split(';').next()?.trim();
+    let (name, value) = pair.split_once('=')?;
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let clean = |s: &str| s.chars().filter(|c| !c.is_control()).collect::<String>();
+    Some((clean(name), clean(value.trim())))
+}
+
+/// Build a `Cookie` request-header value from jar pairs:
+/// `name=value; name2=value2`. `None` for an empty jar (no header at all).
+pub fn cookie_header(cookies: &[(String, String)]) -> Option<String> {
+    if cookies.is_empty() {
+        return None;
+    }
+    Some(
+        cookies
+            .iter()
+            .map(|(n, v)| format!("{n}={v}"))
+            .collect::<Vec<_>>()
+            .join("; "),
+    )
+}
+
+/// Hard ceiling on cache entries per plugin process.
+pub const CACHE_MAX_ENTRIES: usize = 128;
+/// Hard ceiling on the total cached body bytes (~8 MiB). A single body
+/// larger than this never enters the cache.
+pub const CACHE_MAX_TOTAL_BYTES: usize = 8 * 1024 * 1024;
+
+/// One cached response, keyed per caller+method+url+body-hash.
+#[derive(Debug, Clone)]
+pub struct CacheEntry {
+    pub stored_at_ms: u64,
+    pub expires_at_ms: u64,
+    pub status: u16,
+    pub headers: HashMap<String, String>,
+    pub body: Vec<u8>,
+    pub body_encoding: &'static str,
+}
+
+/// Bounded in-memory response cache. Per-caller by construction (the key
+/// embeds `caller_plugin_id`), so no caller can see another caller's cached
+/// data. Evicts the oldest entry (by `stored_at_ms`) when over
+/// [`CACHE_MAX_ENTRIES`] or [`CACHE_MAX_TOTAL_BYTES`].
+#[derive(Default)]
+pub struct CacheStore {
+    entries: HashMap<String, CacheEntry>,
+    total_bytes: usize,
+}
+
+impl CacheStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The cached entry for `key` when present and not yet expired.
+    pub fn get(&self, key: &str, now_ms: u64) -> Option<&CacheEntry> {
+        self.entries
+            .get(key)
+            .filter(|e| now_ms <= e.expires_at_ms)
+    }
+
+    /// Insert or replace `key`, then evict the oldest entries until the
+    /// size bounds hold. A body larger than the whole budget never enters.
+    pub fn put(&mut self, key: String, entry: CacheEntry) {
+        if entry.body.len() > CACHE_MAX_TOTAL_BYTES {
+            return;
+        }
+        if let Some(old) = self.entries.remove(&key) {
+            self.total_bytes = self.total_bytes.saturating_sub(old.body.len());
+        }
+        self.total_bytes = self.total_bytes.saturating_add(entry.body.len());
+        self.entries.insert(key, entry);
+        while self.entries.len() > CACHE_MAX_ENTRIES || self.total_bytes > CACHE_MAX_TOTAL_BYTES {
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, e)| e.stored_at_ms)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            if let Some(evicted) = self.entries.remove(&oldest) {
+                self.total_bytes = self.total_bytes.saturating_sub(evicted.body.len());
+            }
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+/// Cache key for one request: per-caller so cached data never crosses
+/// callers.
+pub fn cache_key(caller_plugin_id: &str, method: &str, url: &str, body_hash: u64) -> String {
+    format!("{caller_plugin_id}|{method}|{url}|{body_hash:x}")
+}
+
+/// Deterministic body fingerprint for the cache key. Multipart requests
+/// hash the canonical part content, not the wire bytes — the boundary is
+/// random per request, so identical multipart uploads must share a key.
+pub fn request_body_hash(params: &HttpRequestParams) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    match &params.multipart {
+        Some(parts) => {
+            "multipart".hash(&mut hasher);
+            for part in parts {
+                part.name.hash(&mut hasher);
+                part.value.hash(&mut hasher);
+                part.file_base64.hash(&mut hasher);
+                part.filename.hash(&mut hasher);
+                part.content_type.hash(&mut hasher);
+            }
+        }
+        None => {
+            params.body.hash(&mut hasher);
+            params.body_base64.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+/// Whether a response may be cached: a 2xx that did not opt out via
+/// `Cache-Control: no-store`.
+pub fn is_cacheable(status: u16, headers: &HashMap<String, String>) -> bool {
+    (200..300).contains(&status)
+        && headers
+            .iter()
+            .all(|(k, v)| !(k.eq_ignore_ascii_case("cache-control") && v.to_ascii_lowercase().contains("no-store")))
 }
 
 #[cfg(test)]
@@ -353,6 +647,9 @@ mod tests {
             headers: HashMap::new(),
             body: None,
             body_base64: None,
+            multipart: None,
+            cache_ttl_ms: 0,
+            use_cookies: false,
             timeout_ms: 5000,
             max_retries: 0,
             retry_backoff_ms: 1,
@@ -690,5 +987,196 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("operator blocklist"), "error was: {err}");
+    }
+
+    #[test]
+    fn parse_set_cookie_extracts_first_pair() {
+        assert_eq!(
+            parse_set_cookie("session=abc123; Path=/; HttpOnly"),
+            Some(("session".to_string(), "abc123".to_string()))
+        );
+        assert_eq!(
+            parse_set_cookie("a=b=c"),
+            Some(("a".to_string(), "b=c".to_string()))
+        );
+        assert_eq!(
+            parse_set_cookie("  padded = value "),
+            Some(("padded".to_string(), "value".to_string()))
+        );
+    }
+
+    #[test]
+    fn parse_set_cookie_rejects_malformed_and_control_chars() {
+        assert_eq!(parse_set_cookie("no-equals-here"), None);
+        assert_eq!(parse_set_cookie(""), None);
+        assert_eq!(parse_set_cookie("=val"), None);
+        let header = "evil=va\u{1b}lue; Path=/";
+        let (name, value) = parse_set_cookie(header).unwrap();
+        assert_eq!(name, "evil");
+        assert_eq!(value, "value", "control chars stripped");
+    }
+
+    #[test]
+    fn cookie_header_joins_pairs_and_none_for_empty() {
+        assert_eq!(cookie_header(&[]), None);
+        assert_eq!(
+            cookie_header(&[
+                ("session".to_string(), "abc".to_string()),
+                ("theme".to_string(), "dark".to_string()),
+            ]),
+            Some("session=abc; theme=dark".to_string())
+        );
+    }
+
+    #[test]
+    fn multipart_body_frames_parts_and_terminates() {
+        use crate::request::MultipartPart;
+        let parts = vec![
+            MultipartPart {
+                name: "note".into(),
+                value: Some("hello".into()),
+                file_base64: None,
+                filename: None,
+                content_type: None,
+            },
+            MultipartPart {
+                name: "file".into(),
+                value: None,
+                file_base64: Some("aGVsbG8=".into()), // "hello" — keeps the body UTF-8
+                filename: Some("blob.bin".into()),
+                content_type: Some("application/octet-stream".into()),
+            },
+        ];
+        let boundary = "----testboundary";
+        let body = build_multipart_body(&parts, boundary).unwrap();
+        let text = String::from_utf8(body).unwrap();
+        assert!(text.starts_with("------testboundary\r\n"), "wire body opens with --{boundary}: {text}");
+        assert!(text.contains("Content-Disposition: form-data; name=\"note\""));
+        assert!(text.contains("Content-Type: text/plain; charset=utf-8\r\n\r\nhello\r\n"));
+        assert!(text.contains("; filename=\"blob.bin\""));
+        assert!(text.contains("Content-Type: application/octet-stream\r\n\r\nhello\r\n"));
+        assert!(text.ends_with("----testboundary--\r\n"));
+    }
+
+    #[test]
+    fn multipart_body_sanitizes_quotes_and_crlf_in_tokens() {
+        use crate::request::MultipartPart;
+        let parts = vec![MultipartPart {
+            name: "a\"b\r\nc".into(),
+            value: Some("v".into()),
+            file_base64: None,
+            filename: Some("f\"n\r\n".into()),
+            content_type: None,
+        }];
+        let body = build_multipart_body(&parts, "----b").unwrap();
+        let text = String::from_utf8(body).unwrap();
+        // CR/LF are stripped, `"` -> `'`: `a"b\r\nc` -> `a'bc`, `f"n\r\n` -> `f'n`.
+        assert!(text.contains("name=\"a'bc\""), "quote escaped, CR/LF stripped: {text}");
+        assert!(text.contains("filename=\"f'n\""), "quote escaped, CR/LF stripped: {text}");
+        assert!(!text.contains("a\"b"), "raw quote gone");
+        assert!(!text.contains("f\"n"), "raw quote gone");
+    }
+
+    #[test]
+    fn cache_store_hit_and_expiry() {
+        let mut store = CacheStore::new();
+        let entry = CacheEntry {
+            stored_at_ms: 0,
+            expires_at_ms: 100,
+            status: 200,
+            headers: HashMap::new(),
+            body: b"hello".to_vec(),
+            body_encoding: "utf8",
+        };
+        store.put("a|GET|u|0".to_string(), entry);
+        assert_eq!(store.len(), 1);
+        assert!(store.get("a|GET|u|0", 99).is_some(), "fresh");
+        assert!(store.get("a|GET|u|0", 100).is_some(), "expiry is <= (inclusive)");
+        assert!(store.get("a|GET|u|0", 101).is_none(), "expired");
+        assert!(store.get("b|GET|u|0", 0).is_none(), "different key");
+    }
+
+    #[test]
+    fn cache_store_evicts_oldest_over_limits() {
+        let mut store = CacheStore::new();
+        for i in 0..CACHE_MAX_ENTRIES + 5 {
+            store.put(
+                format!("k{i}"),
+                CacheEntry {
+                    stored_at_ms: i as u64,
+                    expires_at_ms: u64::MAX,
+                    status: 200,
+                    headers: HashMap::new(),
+                    body: vec![1u8; 16],
+                    body_encoding: "utf8",
+                },
+            );
+        }
+        assert_eq!(store.len(), CACHE_MAX_ENTRIES);
+        assert!(store.get("k0", 0).is_none(), "oldest evicted");
+        assert!(store.get(&format!("k{}", CACHE_MAX_ENTRIES + 4), 0).is_some(), "newest kept");
+    }
+
+    #[test]
+    fn cache_store_rejects_body_over_total_budget() {
+        let mut store = CacheStore::new();
+        store.put(
+            "big".to_string(),
+            CacheEntry {
+                stored_at_ms: 0,
+                expires_at_ms: u64::MAX,
+                status: 200,
+                headers: HashMap::new(),
+                body: vec![0u8; CACHE_MAX_TOTAL_BYTES + 1],
+                body_encoding: "utf8",
+            },
+        );
+        assert!(store.is_empty(), "oversized body never enters");
+    }
+
+    #[test]
+    fn cache_key_is_per_caller() {
+        let k1 = cache_key("caller_a", "GET", "https://x/", 7);
+        let k2 = cache_key("caller_b", "GET", "https://x/", 7);
+        assert_ne!(k1, k2);
+        let k3 = cache_key("caller_a", "POST", "https://x/", 7);
+        assert_ne!(k1, k3);
+    }
+
+    #[test]
+    fn request_body_hash_distinguishes_bodies_but_not_multipart_boundaries() {
+        let mut p1 = params("https://x/".into());
+        p1.body = Some("alpha".into());
+        let mut p2 = params("https://x/".into());
+        p2.body = Some("beta".into());
+        assert_ne!(request_body_hash(&p1), request_body_hash(&p2));
+
+        use crate::request::MultipartPart;
+        let part = MultipartPart {
+            name: "a".into(),
+            value: Some("v".into()),
+            file_base64: None,
+            filename: None,
+            content_type: None,
+        };
+        let mut m1 = params("https://x/".into());
+        m1.multipart = Some(vec![part.clone()]);
+        let mut m2 = params("https://x/".into());
+        m2.multipart = Some(vec![part.clone()]);
+        assert_eq!(request_body_hash(&m1), request_body_hash(&m2), "same content, same hash");
+        let mut m3 = params("https://x/".into());
+        m3.body = Some("not multipart".into());
+        assert_ne!(request_body_hash(&m1), request_body_hash(&m3));
+    }
+
+    #[test]
+    fn is_cacheable_only_for_2xx_without_no_store() {
+        let mut h = HashMap::new();
+        assert!(is_cacheable(200, &h));
+        assert!(!is_cacheable(404, &h), "non-2xx not cacheable");
+        h.insert("Cache-Control".into(), "max-age=60".into());
+        assert!(is_cacheable(200, &h), "no-store absent");
+        h.insert("cache-control".into(), "no-cache, no-store".into());
+        assert!(!is_cacheable(200, &h), "no-store present");
     }
 }

@@ -11,12 +11,15 @@ For configuration, isolation rationale, and concurrency design, see
   query another plugin's data. A missing or malformed caller id is an error,
   never a shared/default bucket.
 - **Two ways to store.** A **KV fast path** (`db_set` / `db_get` / `db_delete`
-  / `db_batch_get`) that stores arbitrary JSON values, and **raw SQL**
-  (`db_query`) against your own file — including tables you create yourself.
+  / `db_batch_get` / `db_incr` / `db_keys` / `db_append` / `db_patch`) that
+  stores arbitrary JSON values, and **raw SQL** (`db_query`) against your own
+  file — including tables you create yourself.
 - **The KV data is a real table** named `kv`:
-  `kv(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL)`.
+  `kv(key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL,
+  expires_at INTEGER)`.
   `db_query` can read and write it directly, but the `value` column holds JSON
-  **text** (see the `db_query` note below).
+  **text** (see the `db_query` note below). `expires_at` is the KV TTL column
+  — see [TTL](#ttl--expiry).
 
 ## How a call looks
 
@@ -44,6 +47,9 @@ Examples below show **params** (what goes in `params_json`) and **result**
 - Upsert: writing an existing key overwrites it.
 - `value` is **any** JSON (object, array, string, number, bool, null). It's
   stored as JSON text and stamped with `updated_at` (unix milliseconds).
+- Optional `ttl_ms` expires the key that many milliseconds after the set —
+  see [TTL](#ttl--expiry). Absent, `0`, or negative = no expiry; re-setting a
+  key without `ttl_ms` clears any previous expiry.
 - Rejected if the serialized value exceeds `max_value_bytes`
   (`value exceeds max_value_bytes (N > M)`). This is a fast-path guard only —
   a raw `db_query` `INSERT` bypasses it; the hard ceiling is the per-caller
@@ -88,6 +94,76 @@ returns the raw text.)
   (`batch_get result exceeds max_response_bytes (> M)`) — you can't pull an
   unbounded blob back by batching many individually-legal values. Split the
   key set if you hit this.
+
+### `db_incr` — atomic integer counter
+
+```jsonc
+// params (delta optional, defaults to 1; negative decrements)
+{"key": "views", "delta": 1}
+// result
+{"ok": true, "value": 1}
+```
+
+- Runs in a single SQLite transaction: safe under concurrent writers — each
+  `db_incr` sees the latest committed value and adds `delta` to it.
+- A missing key starts the counter at `delta`.
+- The stored value must be a JSON integer; anything else fails with
+  `key '<k>' is not a counter: stored value is not an integer`. (Floats are
+  not integers — store integers if you plan to `db_incr`.)
+- A key's TTL, if any, is unaffected by an increment.
+
+### `db_keys` — list key names
+
+```jsonc
+// params (prefix optional, defaults to "")
+{"prefix": "user:"}
+// result
+{"keys": ["user:1", "user:42"]}
+```
+
+- Sorted ascending, keys only. No values.
+- `prefix` filters with `key LIKE '<prefix>%'`, with `%`, `_`, and `\` in
+  your prefix escaped — `{"prefix": "a%"}` matches the literal `a%x`, not
+  `ax`.
+
+### `db_append` — atomic append to a JSON-array value
+
+```jsonc
+// params
+{"key": "events", "value": {"type": "click", "at": 1699900000000}}
+// result
+{"ok": true, "length": 3}
+```
+
+- Runs in a single transaction. A missing key starts a fresh array
+  `[value]`; an existing key must hold a JSON array, otherwise
+  `key '<k>' is not an array: cannot append`.
+- `value` is any JSON — appended as one element, exactly like `db_set`'s
+  value handling.
+- The serialized result is re-checked against `max_value_bytes` (same
+  rejection as `db_set`), so you can't grow an array past the cap one
+  element at a time.
+
+### `db_patch` — JSON-path update via `json_set`
+
+```jsonc
+// params
+{"key": "user:42", "path": "$.settings.theme", "value": "dark"}
+// result
+{"ok": true, "value": {"name": "Ada", "settings": {"theme": "dark"}}}
+```
+
+- Runs in a single transaction. The key must exist (and not be expired):
+  `key not found: '<k>'`.
+- `path` is a SQLite JSON path — `$.a.b` for objects, `$[0]` for array
+  indices (SQLite paths are 1-based for `$[1]` style subscripts on objects;
+  array indices in `$[0]` form are 0-based). The new value is written at
+  that path and the **full updated value** is returned.
+- `value` is arbitrary JSON, injected as `json(?3)`. A malformed path
+  surfaces as `invalid JSON path "<path>": …`; note SQLite silently ignores
+  some syntactically odd paths (e.g. `$[`) and leaves the value unchanged —
+  a returned `ok` with an unchanged value means the path didn't match
+  anything.
 
 ## `db_query` — raw SQL against your own file
 
@@ -174,11 +250,12 @@ below are stable enough to branch on by substring (`max_value_bytes`,
 
 | Message (shape) | Cause |
 |---|---|
-| `invalid params for db_get, expected {key}: …` | `params_json` didn't match the action's shape (same for `db_set`/`db_delete`/`db_batch_get`/`db_query`) |
-| `params.key must be a non-empty string` | `db_get`/`db_set`/`db_delete` with empty `key` |
+| `invalid params for db_get, expected {key}: …` | `params_json` didn't match the action's shape (same pattern for every action) |
+| `params.key must be a non-empty string` | `db_get`/`db_set`/`db_delete`/`db_incr`/`db_append`/`db_patch` with empty `key` |
 | `params.keys must be a non-empty array` | `db_batch_get` with `keys: []` |
+| `params.path must be a non-empty string` | `db_patch` with empty/missing `path` |
 | `params.sql must be a non-empty string` | `db_query` with blank `sql` |
-| `unknown action: <name>` | action isn't one of the five |
+| `unknown action: <name>` | action isn't one of the nine |
 
 **Rejected by policy / limits:**
 
@@ -200,6 +277,10 @@ below are stable enough to branch on by substring (`max_value_bytes`,
 | `no such table` / `no such column` | querying something you never created | create your table first (see Recipes) |
 | `UNIQUE constraint failed` | `INSERT` collides with a primary key / unique index | use upsert (`on conflict … do update`) |
 | `corrupt stored value for key "<k>": …` | a `kv` `value` cell holds text that isn't valid JSON (e.g. written by a raw `INSERT` with a non-JSON string) | overwrite the key with `db_set`, or store valid JSON text via SQL |
+| `key '<k>' is not a counter: stored value is not an integer` | `db_incr` on a value that isn't a JSON integer | store integers if you plan to `db_incr` |
+| `key '<k>' is not an array: cannot append` | `db_append` on a value that isn't a JSON array | store arrays if you plan to `db_append` |
+| `key not found: '<k>'` | `db_patch` on a missing or expired key | set the key first |
+| `invalid JSON path "<p>": …` | `db_patch` with a malformed SQLite JSON path | fix the path; note some odd paths are silently ignored instead (see `db_patch`) |
 | `handler panicked: …` | a bug in the plugin — should never happen; the loop converts the panic into this error instead of dropping your reply | report it |
 
 ## Recipes
@@ -237,14 +318,46 @@ single `db_query` — the whole block runs on one connection, in order:
 If any statement fails, the `commit` isn't reached and the `begin` is rolled
 back when the connection returns to the pool.
 
-### TTL / expiry (do it yourself)
+### TTL / expiry
 
-There's no built-in expiry (see ROADMAP non-goals). Store an expiry column and
-filter on read, sweeping lazily:
+The KV layer has built-in TTL: `db_set {key, value, ttl_ms}` stamps
+`expires_at = now + ttl_ms`. Semantics:
+
+- **Enforced everywhere.** Before every action (including raw `db_query`),
+  the plugin sweeps `DELETE FROM kv WHERE expires_at <= now`, and the KV
+  accessors (`db_get`, `db_batch_get`, `db_incr`, `db_append`, `db_patch`)
+  additionally filter on `expires_at IS NULL OR expires_at > now` — so an
+  expired key reads as missing, and a batch mixing expired and live keys
+  returns `null` for the expired ones. `db_incr`/`db_append` on an expired
+  key start fresh, `db_patch` reports `key not found`.
+- **Absent/`0`/negative `ttl_ms` = no expiry**, and re-setting without
+  `ttl_ms` clears a previous expiry (the upsert overwrites `expires_at`).
+- **`expires_at` is visible to raw SQL** — it's a plain nullable INTEGER
+  column on `kv` (unix ms). Your own tables don't get TTL; keep filtering
+  them yourself (the sweep only touches `kv`).
 
 ```jsonc
-{"sql": "delete from sessions where expires_at < ?1", "params": [1699999999000]}
+// params — agent cache entry that dies in five minutes
+{"key": "cache:weather", "value": {"temp": 21}, "ttl_ms": 300000}
 ```
+
+### Change events
+
+Every mutation — `db_set`, `db_delete` (only when a row was actually
+deleted), `db_incr`, `db_append`, `db_patch` — publishes a best-effort
+event of type `plugin.database.changed` (the kernel prepends the
+`plugin.<sender_id>.` namespace, so subscribe to the fully-qualified type).
+The payload is one JSON object:
+
+```json
+{"caller": "notes", "action": "db_set", "key": "user:42"}
+```
+
+Reads (`db_get`, `db_batch_get`, `db_keys`, `db_query`) publish nothing.
+Publishing is fire-and-forget: the `ActionResponse` always goes out first,
+and a dropped event never delays or fails your reply. The event fires only
+if the `database` plugin holds `PERMISSION_EVENT_PUBLISH` (its manifest
+declares it).
 
 ### Paginate large reads
 

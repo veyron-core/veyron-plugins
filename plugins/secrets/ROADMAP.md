@@ -36,11 +36,14 @@ gate live in one place.
 
 ## Near-term (buildable now, no kernel changes)
 
-- **Migrate shipped plugins onto `secrets`** — `ai`/`tts`/`stt` currently
-  read provider keys from plaintext env vars (`AI_PLUGIN_ALLOWED_KEY_ENVS`
-  etc.). Move the keys into the vault; keep the env-var name as the *handle*
-  the plugin looks up (`secret_get` by name) so the per-caller permission
-  story and the operator's mental model stay intact.
+- **Migrate shipped plugins onto `secrets`** — **done**: `ai`/`tts`/`stt`
+  now resolve provider keys vault-first — `secret_get` against their own
+  per-caller vault keyed by the env-var-style handle (`api_key_env`), with
+  the plaintext config env var as fallback (vault wins). The env-var name
+  stays the handle, so the per-caller permission story and the operator's
+  mental model are intact; the allowlist
+  (`AI_PLUGIN_ALLOWED_KEY_ENVS` etc.) still gates which handles a caller
+  may reference.
 - **`secret_delete` batch / `secret_get_many`** — only if a real consumer
   needs it; one-at-a-time is fine for the current scale.
 - **Vault file locking across restarts** — single-writer assumption today

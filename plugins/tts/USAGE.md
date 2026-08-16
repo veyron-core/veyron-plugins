@@ -25,7 +25,7 @@ Turn text into audio bytes.
 | `provider` | yes | `sherpa` (local) \| `openai` \| `elevenlabs` (cloud) |
 | `text` | yes | 1–4000 chars; trimmed |
 | `voice` | yes | provider-specific id (below) |
-| `api_key_env` | cloud only | env var name the `tts` process reads at call time; must be on the operator's `TTS_PLUGIN_ALLOWED_KEY_ENVS` allowlist. Never pass a literal key. |
+| `api_key_env` | cloud only | lookup handle (env-var-style name) for the provider key — `tts` reads it from the `secrets` plugin's vault first, then falls back to its own env; must be on the operator's `TTS_PLUGIN_ALLOWED_KEY_ENVS` allowlist. Never pass a literal key. |
 | `format` | no | `sherpa`: `wav` (default) \| `pcm`. `openai`: `mp3` (default) \| `wav` \| `pcm`. `elevenlabs`: `mp3` (default) \| `pcm` |
 | `speed` | no | `0.25`–`4.0`, default `1.0`, clamped |
 | `timeout_ms` | no | default 30000, capped at 60000; cloud hops additionally capped at 30000 by `network` |
@@ -228,7 +228,7 @@ string.
 | `sherpa supports formats wav\|pcm, got: X` | bad format for provider |
 | `missing required field: api_key_env` / `api_key_env must not be empty` | cloud provider without a key reference |
 | `api_key_env 'X' is not in the operator's TTS_PLUGIN_ALLOWED_KEY_ENVS allowlist` | key env not allowlisted |
-| `environment variable X is not set` | allowlisted env var unset/empty |
+| `key 'X' is neither in the secrets vault nor set as an environment variable` | allowlisted key handle absent from both the secrets vault and the env |
 | `TTS_PLUGIN_LOCAL_MODEL_DIR is not set ...` | local provider, no model dir configured |
 | `TTS_PLUGIN_LOCAL_MODEL_TYPE is not set ...` / `... is unsupported (use 'kokoro' or 'piper')` | local provider, bad model type |
 | `missing required model file: <path>` | model dir lacks `model.onnx` / `voices.bin` / `tokens.txt` / `espeak-ng-data` |

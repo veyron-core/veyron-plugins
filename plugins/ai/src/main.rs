@@ -2,6 +2,9 @@
 //! through `network`'s `http_request` action rather than opening its own
 //! sockets (see ROADMAP.md, "Decision: reuse `network`, don't reinvent").
 //!
+//! v0.3 adds a SQLite store (`VEYRON_DATA_DIR/ai.db`) holding declared +
+//! auto-discovered models, agent profiles, and per-call token usage.
+//!
 //! Doesn't use the SDK's `Plugin::run`/`serve` loop: `Plugin::on_message`
 //! only gets `&mut self`, not `&mut VeyronClient`, and there is no way to
 //! get a second client for the outbound `send_action` call into `network`
@@ -13,22 +16,35 @@
 //! hand. Sequential, one request at a time — same model `network` and
 //! `ping-pong-rs` already use.
 
-use ai_plugin::handler;
-use veyron_sdk::proto::{
-    envelope, ActionResponse, ActionStatus, Envelope, PluginManifest, Pong,
-};
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use ai_plugin::{config, db, discovery, handler};
+use veyron_sdk::proto::{envelope, ActionResponse, ActionStatus, Envelope, PluginManifest, Pong};
 use veyron_sdk::{VeyronClient, VeyronError};
 
 const PLUGIN_ID: &str = "ai";
-const PLUGIN_VERSION: &str = "0.2.0";
+const PLUGIN_VERSION: &str = "0.3.0";
+
+/// Startup model-refresh retries: the first attempts typically race the
+/// `network` plugin's registration (`ActionNotFound`).
+const STARTUP_REFRESH_ATTEMPTS: u32 = 5;
 
 fn manifest() -> PluginManifest {
     PluginManifest {
         // `network`: ai invokes `network`'s gated `http_request` action, and
-        // T-19 requires callers of a gated action to hold its permission too
-        // (matches plugin.json `permissions`; Manifest v2 per-action model).
-        permissions: vec!["PERMISSION_NETWORK".into()],
-        actions: vec!["chat_completion".to_string()],
+        // `secrets`: ai resolves provider keys from the secrets vault first
+        // (`secret_get`, gated by PERMISSION_SECRETS). T-19 requires callers
+        // of a gated action to hold its permission too (matches plugin.json
+        // `permissions`; Manifest v2 per-action model).
+        permissions: vec!["PERMISSION_NETWORK".into(), "PERMISSION_SECRETS".into()],
+        actions: vec![
+            "chat_completion".to_string(),
+            "list_models".to_string(),
+            "list_agents".to_string(),
+            "refresh_models".to_string(),
+            "usage_stats".to_string(),
+        ],
         ..Default::default()
     }
 }
@@ -43,29 +59,40 @@ fn unix_millis() -> u64 {
 async fn handle_action_request(
     client: &mut VeyronClient,
     req: veyron_sdk::proto::ActionRequest,
+    db: &db::AiDb,
+    cfg: &config::AiConfig,
 ) -> Envelope {
-    let reply = if req.action == "chat_completion" {
-        match handler::handle_chat_completion(client, &req.params_json).await {
-            Ok(data_json) => ActionResponse {
-                action_id: req.action_id,
-                status: ActionStatus::ActionOk as i32,
-                data_json,
-                error: String::new(),
-            },
-            Err(error) => ActionResponse {
-                action_id: req.action_id,
-                status: ActionStatus::ActionError as i32,
-                data_json: Vec::new(),
-                error,
-            },
+    let outcome = match req.action.as_str() {
+        "chat_completion" => handler::handle_chat_completion(client, &req.params_json, db).await,
+        "list_models" => handler::handle_list_models(db),
+        "list_agents" => handler::handle_list_agents(db),
+        "usage_stats" => handler::handle_usage_stats(db),
+        "refresh_models" => handler::handle_refresh_models(client, db, &cfg.discovery).await,
+        other => {
+            return Envelope {
+                payload: Some(envelope::Payload::ActionResponse(ActionResponse {
+                    action_id: req.action_id,
+                    status: ActionStatus::ActionNotFound as i32,
+                    data_json: Vec::new(),
+                    error: format!("unknown action: {other}"),
+                })),
+                ..Default::default()
+            };
         }
-    } else {
-        ActionResponse {
+    };
+    let reply = match outcome {
+        Ok(data_json) => ActionResponse {
             action_id: req.action_id,
-            status: ActionStatus::ActionNotFound as i32,
+            status: ActionStatus::ActionOk as i32,
+            data_json,
+            error: String::new(),
+        },
+        Err(error) => ActionResponse {
+            action_id: req.action_id,
+            status: ActionStatus::ActionError as i32,
             data_json: Vec::new(),
-            error: format!("unknown action: {}", req.action),
-        }
+            error,
+        },
     };
     Envelope {
         payload: Some(envelope::Payload::ActionResponse(reply)),
@@ -73,7 +100,11 @@ async fn handle_action_request(
     }
 }
 
-async fn serve(mut client: VeyronClient) -> Result<(), VeyronError> {
+async fn serve(
+    mut client: VeyronClient,
+    db: Arc<db::AiDb>,
+    cfg: config::AiConfig,
+) -> Result<(), VeyronError> {
     let jwt_token = std::env::var("VEYRON_JWT_TOKEN").unwrap_or_default();
     let ack = client
         .register_full(PLUGIN_ID, PLUGIN_VERSION, manifest(), &jwt_token)
@@ -85,6 +116,54 @@ async fn serve(mut client: VeyronClient) -> Result<(), VeyronError> {
         )));
     }
     println!("[{PLUGIN_ID}] registered with kernel");
+
+    if let Err(e) = config::seed(&db, &cfg) {
+        eprintln!("[{PLUGIN_ID}] failed to seed config: {e}");
+    }
+
+    if !cfg.discovery.is_empty() {
+        for _ in 0..STARTUP_REFRESH_ATTEMPTS {
+            match handler::handle_refresh_models(&mut client, &db, &cfg.discovery).await {
+                Ok(data) => match serde_json::from_slice::<discovery::Discovered>(&data) {
+                    Ok(d) => {
+                        println!(
+                            "[{PLUGIN_ID}] models refreshed: {} new, {} updated",
+                            d.discovered, d.updated
+                        );
+                        for e in &d.errors {
+                            eprintln!("[{PLUGIN_ID}] discovery error: {e}");
+                        }
+                        if d.errors.is_empty() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[{PLUGIN_ID}] failed to decode refresh result: {e}");
+                        break;
+                    }
+                },
+                Err(e) => eprintln!("[{PLUGIN_ID}] initial model refresh failed: {e}"),
+            }
+            // The startup refresh races the `network` plugin's registration
+            // (ActionNotFound) — back off and retry rather than dying on it.
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+    }
+
+    // Tie the default model to the default agent's model when no model
+    // default is configured explicitly (fresh installs land on the
+    // operator's chosen default agent instead of the first alphabetical id).
+    if db.default_model().map(|m| m.is_none()).unwrap_or(true) {
+        if let Ok(Some(agent)) = db.default_agent() {
+            if db
+                .get_model(&agent.model_id)
+                .map(|m| m.is_some())
+                .unwrap_or(false)
+            {
+                let _ = db.set_model_default(&agent.model_id);
+            }
+        }
+    }
 
     loop {
         let env = match client.recv().await {
@@ -109,7 +188,7 @@ async fn serve(mut client: VeyronClient) -> Result<(), VeyronError> {
                 let _ = client.ack_event(&event.event_id).await;
             }
             Some(envelope::Payload::ActionRequest(req)) => {
-                let resp = handle_action_request(&mut client, req).await;
+                let resp = handle_action_request(&mut client, req, &db, &cfg).await;
                 let _ = client.send("kernel", resp).await;
             }
             other => {
@@ -133,5 +212,16 @@ async fn main() -> Result<(), VeyronError> {
         Some(s) => VeyronClient::connect_with_secret(&socket_path, s.as_bytes()).await?,
         None => VeyronClient::connect(&socket_path).await?,
     };
-    serve(client).await
+
+    let data_dir = std::env::var_os("VEYRON_DATA_DIR").map(PathBuf::from);
+    let db = match db::AiDb::open(data_dir.as_deref()) {
+        Ok(db) => Arc::new(db),
+        Err(e) => {
+            eprintln!("[{PLUGIN_ID}] cannot open database: {e}");
+            std::process::exit(1);
+        }
+    };
+    let cfg = config::from_env();
+
+    serve(client, db, cfg).await
 }

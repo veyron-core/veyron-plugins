@@ -1,0 +1,59 @@
+# Example kernel config.yaml entry for the `notify` plugin (v0.2.0).
+# Copy this block into the top-level `plugins:` list of the kernel's
+# config.yaml (see repo root config.yaml for the full schema).
+#
+# `notify` declares one kernel permission — PERMISSION_NOTIFY. It opens no
+# sockets of its own; every delivery spawns a host binary (`notify-send`,
+# `wall`, `espeak-ng`/`espeak`) with argv only, never a shell. If the
+# kernel's sandboxing blocks spawning host binaries (or `notify-send`
+# can't reach the session DBus notification daemon from inside the
+# sandbox), set `sandbox: false` for this plugin — notification content is
+# still argv-only, so no shell is involved either way.
+#
+# `notify` reads no config file — the only configuration is the env vars
+# listed here, read at call time (see src/providers.rs and src/inbox.rs).
+#
+# Installing the provider binaries (Arch):
+#   notify-send: sudo pacman -S libnotify     (required for the primary provider)
+#   espeak:      sudo pacman -S espeak-ng     (optional; spoken alerts)
+#   wall:        ships with util-linux, installed by default on most distros
+
+plugins:
+  - id: notify
+    binary: /opt/plugins/notify        # path to the built `notify` binary
+    restart: on-failure
+    max_restarts: 5
+    sandbox: true                      # no sockets; spawns host binaries via argv only.
+                                       # If spawn is blocked under the sandbox, set sandbox: false.
+    env:
+      # Optional: default app name shown by notify-send when a request
+      # omits app_name. Default: veyron.
+      # - NOTIFY_PLUGIN_APP_NAME=veyron
+      # Optional: comma-separated list of enabled providers
+      # (notify-send, wall, espeak). Empty/unset = all enabled. A provider
+      # not on the list is rejected at call time; an unknown id here makes
+      # every deliver call fail.
+      # - NOTIFY_PLUGIN_ENABLED_PROVIDERS=notify-send,wall,espeak
+      # Required only for the inbox features: `silent: true` notifications
+      # and the notify_list / notify_mark_read / notify_delete actions.
+      # Normal deliveries work without it — the inbox audit entry is just
+      # skipped. Notifications are stored as plaintext JSON at
+      # $NOTIFY_PLUGIN_DATA_DIR/inbox.json (atomic writes, mode 0600).
+      # - NOTIFY_PLUGIN_DATA_DIR=/var/lib/veyron/notify
+      # --- speak: true (tts озвучка, best-effort) --------------------------
+      # speak requires the `tts` plugin to be registered and running, with
+      # its own provider/model config in place (see plugins/tts/). Its
+      # tts_synthesize action carries no per-action permission gate, so
+      # notify needs no extra permission to call it.
+      # - NOTIFY_PLUGIN_TTS_PROVIDER=sherpa        # default: sherpa
+      # - NOTIFY_PLUGIN_TTS_VOICE=af_heart         # optional; omitted when unset
+      # - NOTIFY_PLUGIN_TTS_FORMAT=wav             # default: wav (pcm is not playable)
+      # Optional: audio player binary for speak. wav auto-detects
+      # paplay (libpulse) / pw-play (pipewire) / aplay (alsa-utils); any
+      # non-wav format needs ffplay.
+      #   Arch: sudo pacman -S libpulse   (paplay)  or  pipewire  (pw-play);
+      #         sudo pacman -S ffmpeg     (ffplay)
+      # - NOTIFY_PLUGIN_AUDIO_PLAYER=paplay
+    grace_seconds: 10
+    max_procs: 64
+    max_vmem_mb: 512

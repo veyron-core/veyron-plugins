@@ -73,13 +73,7 @@ async fn transcribe_cloud(
         ));
     }
 
-    let api_key = std::env::var(&params.api_key_env).unwrap_or_default();
-    if api_key.is_empty() {
-        return Err(format!(
-            "environment variable {} is not set",
-            params.api_key_env
-        ));
-    }
+    let api_key = crate::key_resolve::resolve_api_key(client, &params.api_key_env).await?;
 
     let provider: &dyn Provider = &OpenAiProvider;
     let http_req = provider.build_http_request(params, &api_key);

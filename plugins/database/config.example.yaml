@@ -2,6 +2,16 @@
 data_dir: /var/lib/veyron/database   # required, directory holding per-caller .db files
 pool_size: 4                          # connections per caller pool
 busy_timeout_ms: 5000                 # SQLite busy timeout
-max_value_bytes: 1048576              # 1 MiB, db_set value size cap
-max_response_bytes: 4194304           # 4 MiB, db_query result size cap
+max_value_bytes: 1048576              # 1 MiB, db_set/db_append value size cap
+max_response_bytes: 4194304           # 4 MiB, db_query/db_batch_get result size cap
 max_db_bytes: 268435456               # 256 MiB, hard per-caller disk quota (SQLITE_FULL past this); 0 disables
+
+# v0.3 actions and TTL need no extra config:
+#   db_set {key, value, ttl_ms?}  — ttl_ms expires the key N ms after the set
+#   db_incr {key, delta?}         — atomic integer counter (delta defaults to 1)
+#   db_keys {prefix?}             — list key names, optional prefix filter
+#   db_append {key, value}        — atomic append to a JSON-array value
+#   db_patch {key, path, value}   — JSON-path update via SQLite json_set
+# Expired keys are swept before every action and read as missing by the KV
+# accessors. Mutations publish best-effort plugin.database.changed events
+# {caller, action, key} (requires the plugin's PERMISSION_EVENT_PUBLISH).
