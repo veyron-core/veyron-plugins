@@ -58,6 +58,12 @@ pub struct ChatCompletionParams {
     pub messages: Vec<Message>,
     pub max_tokens: u32,
     pub timeout_ms: u64,
+    /// Named agent whose model + system prompt are resolved by the handler
+    /// from the database. When set, `model`/`provider`/`base_url`/
+    /// `api_key_env` may be empty (they are filled in by the handler).
+    pub agent_id: Option<String>,
+    /// System prompt resolved from the agent profile (never caller-supplied).
+    pub system_prompt: Option<String>,
 }
 
 /// Parse and validate `params_json` for the `chat_completion` action.
@@ -79,34 +85,39 @@ pub fn parse_request(params_json: &[u8]) -> Result<ChatCompletionParams, String>
         messages: Option<Vec<RawMessage>>,
         max_tokens: Option<u32>,
         timeout_ms: Option<u64>,
+        agent_id: Option<String>,
     }
 
-    let raw: Raw =
-        serde_json::from_slice(params_json).map_err(|e| format!("invalid JSON: {e}"))?;
+    let raw: Raw = serde_json::from_slice(params_json).map_err(|e| format!("invalid JSON: {e}"))?;
 
-    let provider_str = raw.provider.ok_or("missing required field: provider")?;
-    let provider = match provider_str.as_str() {
-        "anthropic" => Provider::Anthropic,
-        "openai" => Provider::OpenAi,
-        other => return Err(format!("unsupported provider: {other}")),
+    let agent_id = raw.agent_id.filter(|s| !s.is_empty());
+
+    let provider = match raw.provider {
+        Some(p) => match p.as_str() {
+            "anthropic" => Provider::Anthropic,
+            "openai" => Provider::OpenAi,
+            other => return Err(format!("unsupported provider: {other}")),
+        },
+        // Resolved from the database when an agent_id names the model.
+        None if agent_id.is_some() => Provider::OpenAi,
+        None => return Err("missing required field: provider".to_string()),
     };
 
     let base_url = match (raw.base_url, provider) {
         (Some(u), _) if !u.is_empty() => u,
         (_, Provider::Anthropic) => DEFAULT_ANTHROPIC_BASE_URL.to_string(),
+        (_, Provider::OpenAi) if agent_id.is_some() => String::new(),
         (_, Provider::OpenAi) => return Err("missing required field: base_url".to_string()),
     };
 
-    let model = raw.model.ok_or("missing required field: model")?;
-    if model.is_empty() {
-        return Err("model must not be empty".to_string());
+    let model = raw.model.unwrap_or_default();
+    if model.is_empty() && agent_id.is_none() {
+        return Err("missing required field: model".to_string());
     }
 
-    let api_key_env = raw
-        .api_key_env
-        .ok_or("missing required field: api_key_env")?;
-    if api_key_env.is_empty() {
-        return Err("api_key_env must not be empty".to_string());
+    let api_key_env = raw.api_key_env.unwrap_or_default();
+    if api_key_env.is_empty() && agent_id.is_none() {
+        return Err("missing required field: api_key_env".to_string());
     }
 
     let raw_messages = raw.messages.ok_or("missing required field: messages")?;
@@ -135,6 +146,8 @@ pub fn parse_request(params_json: &[u8]) -> Result<ChatCompletionParams, String>
         messages,
         max_tokens,
         timeout_ms,
+        agent_id,
+        system_prompt: None,
     })
 }
 
@@ -167,6 +180,19 @@ mod tests {
         body.as_object_mut().unwrap().remove("provider");
         let err = parse_request(body.to_string().as_bytes()).unwrap_err();
         assert!(err.contains("provider"), "error was: {err}");
+    }
+
+    #[test]
+    fn agent_id_allows_omitting_provider_and_model() {
+        let body = serde_json::json!({
+            "agent_id": "code",
+            "messages": [{"role": "user", "content": "hi"}],
+        });
+        let params = parse_request(body.to_string().as_bytes()).unwrap();
+        assert_eq!(params.agent_id.as_deref(), Some("code"));
+        assert!(params.model.is_empty());
+        assert!(params.base_url.is_empty());
+        assert!(params.api_key_env.is_empty());
     }
 
     #[test]
