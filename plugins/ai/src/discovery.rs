@@ -113,7 +113,9 @@ async fn fetch_ids(
             HashMap::new(),
         ),
         "openai" => {
-            let key = std::env::var(&src.api_key_env).unwrap_or_default();
+            let key = crate::key_resolve::resolve_api_key(client, &src.api_key_env)
+                .await
+                .unwrap_or_default();
             let mut h = HashMap::new();
             if !key.is_empty() {
                 h.insert("Authorization".to_string(), format!("Bearer {key}"));

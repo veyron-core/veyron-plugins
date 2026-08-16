@@ -27,15 +27,18 @@ caller can hit, and common patterns.
 
 ## Operator note
 
-`stt` declares three kernel permissions (`plugin.json`:
-`"permissions": ["network", "PERMISSION_AUDIO_STREAM", "PERMISSION_EVENT_PUBLISH"]`).
+`stt` declares four permissions (`plugin.json`:
+`"permissions": ["network", "secrets", "PERMISSION_AUDIO_STREAM", "PERMISSION_EVENT_PUBLISH"]`).
 `network` because its cloud provider invokes the `network` plugin's gated
 `http_request` action, and the kernel's anti-laundering check (T-19)
 requires callers of a gated action to hold its permission too (Manifest
-v2). `audio_stream` because the listen path receives `AudioStreamChunk`
-PCM from a mic peer, and `event_publish` because `stt_listen_stop`
-publishes the transcript as an `stt_text` event (both proto v1.6). It
-opens no sockets itself, so it's safe to run with `sandbox: true`.
+v2). `secrets` because the cloud provider resolves its API key through
+the `secrets` plugin's gated `secret_get` action first (the env var is
+only the fallback). `audio_stream` because the listen path receives
+`AudioStreamChunk` PCM from a mic peer, and `event_publish` because
+`stt_listen_stop` publishes the transcript as an `stt_text` event (both
+proto v1.6). It opens no sockets itself, so it's safe to run with
+`sandbox: true`.
 `network` still needs `sandbox: false` (real
 egress) for the cloud provider — see `plugins/network/README.md`.
 
@@ -68,9 +71,11 @@ Request (`ActionRequest.params_json`):
 - `prompt` — optional Whisper-style context hint (`openai` only), ≤ 1000
   chars.
 - `temperature` — optional, `0.0`..=`1.0` (`openai` only).
-- `api_key_env` — required for `openai` (name of an env var the `stt`
-  process reads at call time, never a literal key; must be on the
-  operator's `STT_PLUGIN_ALLOWED_KEY_ENVS` allowlist). Ignored for `sherpa`.
+- `api_key_env` — required for `openai` (never a literal key; must be on
+  the operator's `STT_PLUGIN_ALLOWED_KEY_ENVS` allowlist). Resolved
+  secrets-first: the key is read from `stt`'s own `secrets` vault under
+  this exact name, with the same-named env var of the `stt` process as
+  fallback — the vault wins when both exist. Ignored for `sherpa`.
 - `timeout_ms` — optional, default/cap `60000`. Cloud requests are
   additionally capped at `network`'s own 30 s HTTP limit.
 - `base_url`, `model` — optional per-provider overrides (defaults:
@@ -137,8 +142,8 @@ Requires `PERMISSION_AUDIO_STREAM` and `PERMISSION_EVENT_PUBLISH`.
 
 ## Configuration
 
-`stt` reads no config file itself — everything is environment variables
-set in the kernel's `config.yaml`, under this plugin's `env:` list — see
+`stt` reads no config file itself — environment variables set in the
+kernel's `config.yaml`, under this plugin's `env:` list — see
 `config.example.yaml` in this directory.
 
 - `STT_PLUGIN_ALLOWED_KEY_ENVS` — **required for the cloud provider**: a
@@ -146,6 +151,12 @@ set in the kernel's `config.yaml`, under this plugin's `env:` list — see
   `api_key_env` may reference. Default-deny — without it every cloud
   `stt_transcribe` request is rejected. Same rationale as `ai`'s
   `AI_PLUGIN_ALLOWED_KEY_ENVS` and `tts`'s `TTS_PLUGIN_ALLOWED_KEY_ENVS`.
+- The provider key itself is resolved secrets-first: `stt` looks it up in
+  its own `secrets` vault under the env-var name (`secret_set {"name":
+  "OPENAI_API_KEY", "value": "sk-..."}`), and falls back to the env var
+  of the same name. The vault wins when both exist. `secrets` must be
+  registered and running for the vault hop; without it the env var is
+  used.
 - `STT_PLUGIN_LOCAL_MODEL_DIR` — **required for `sherpa`**: directory with
   the ONNX model files.
 - `STT_PLUGIN_LOCAL_MODEL_TYPE` — **required for `sherpa`**: `transducer`

@@ -46,6 +46,22 @@ plugins:
       # in their chat_completion request; the key itself never leaves the
       # host. Local Ollama needs no key — the openai-compatible adapter
       # omits the Authorization header when the resolved value is empty.
+      #
+      # Resolution order is vault-first: at call time `ai` asks the
+      # `secrets` plugin's vault for the key under the same name (its
+      # `secret_get` action), and only falls back to these env vars when
+      # the vault has no non-empty value. The vault wins when both exist.
+      # To store a key in the vault instead of an env var, have the
+      # operator run (via the web UI or another plugin):
+      #
+      #   secret_set {"name":"ANTHROPIC_API_KEY","value":"sk-ant-..."}
+      #   secret_set {"name":"OPENAI_API_KEY","value":"sk-..."}
+      #
+      # (the `secrets` plugin must be registered; `ai` declares the
+      # `secrets` permission for this). Keys stored only in the vault may
+      # be dropped from this `env:` list entirely, but the names still
+      # need no entry here — the allowlist above gates the handle either
+      # way.
       - ANTHROPIC_API_KEY=sk-ant-...
       - OPENAI_API_KEY=sk-...
       - OLLAMA_API_KEY=

@@ -29,12 +29,16 @@ fn manifest() -> PluginManifest {
         // `http_request`, and T-19 requires callers of a gated action to hold
         // its permission too (matches plugin.json `permissions`; Manifest v2
         // per-action model).
+        // `secrets`: the cloud provider resolves its API key through the
+        // `secrets` plugin's gated `secret_get` action first (env var is
+        // only the fallback), so stt must hold PERMISSION_SECRETS too.
         // `audio_stream`: the listen path receives `AudioStreamChunk` PCM
         // from a mic peer (PERMISSION_AUDIO_STREAM, proto v1.6).
         // `event_publish`: `stt_listen_stop` publishes the transcript as an
         // `stt_text` event (PERMISSION_EVENT_PUBLISH).
         permissions: vec![
             "PERMISSION_NETWORK".into(),
+            "PERMISSION_SECRETS".into(),
             "PERMISSION_AUDIO_STREAM".into(),
             "PERMISSION_EVENT_PUBLISH".into(),
         ],

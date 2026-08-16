@@ -1,7 +1,7 @@
 {
   "plugin_id": "ai",
   "version": "0.3.0",
-  "permissions": ["network"],
+  "permissions": ["network", "secrets"],
   "kernel_compatibility_range": {
     "min": "0.1.0",
     "max": "*"

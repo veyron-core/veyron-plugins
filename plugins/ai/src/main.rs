@@ -33,9 +33,11 @@ const STARTUP_REFRESH_ATTEMPTS: u32 = 5;
 fn manifest() -> PluginManifest {
     PluginManifest {
         // `network`: ai invokes `network`'s gated `http_request` action, and
-        // T-19 requires callers of a gated action to hold its permission too
-        // (matches plugin.json `permissions`; Manifest v2 per-action model).
-        permissions: vec!["PERMISSION_NETWORK".into()],
+        // `secrets`: ai resolves provider keys from the secrets vault first
+        // (`secret_get`, gated by PERMISSION_SECRETS). T-19 requires callers
+        // of a gated action to hold its permission too (matches plugin.json
+        // `permissions`; Manifest v2 per-action model).
+        permissions: vec!["PERMISSION_NETWORK".into(), "PERMISSION_SECRETS".into()],
         actions: vec![
             "chat_completion".to_string(),
             "list_models".to_string(),

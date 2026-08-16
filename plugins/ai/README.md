@@ -17,13 +17,15 @@ provider-agnostic calls, system prompts).
 
 ## Operator note
 
-`ai` declares one kernel permission — `network` (`plugin.json`:
-`"permissions": ["network"]`) — because it invokes the `network` plugin's
-gated `http_request` action, and the kernel's anti-laundering check (T-19)
-requires callers of a gated action to hold its permission too (Manifest v2:
-per-action `permission` on `http_request`). It opens no sockets itself, so
-it's safe to run with `sandbox: true`. `network` still needs
-`sandbox: false` (real egress) — see `plugins/network/README.md`.
+`ai` declares two kernel permissions — `network` and `secrets`
+(`plugin.json`: `"permissions": ["network", "secrets"]`) — because it
+invokes the `network` plugin's gated `http_request` action and the
+`secrets` plugin's gated `secret_get` action, and the kernel's
+anti-laundering check (T-19) requires callers of a gated action to hold
+its permission too (Manifest v2: per-action `permission` on
+`http_request`). It opens no sockets itself, so it's safe to run with
+`sandbox: true`. `network` still needs `sandbox: false` (real egress) —
+see `plugins/network/README.md`.
 
 ## Action: `chat_completion`
 
@@ -46,12 +48,17 @@ Request (`ActionRequest.params_json`):
   OpenAI/OpenRouter/Ollama/self-hosted). Optional for `anthropic`, defaults
   to `https://api.anthropic.com`.
 - `model` — required, non-empty.
-- `api_key_env` — name of an environment variable the `ai` **process**
-  reads at call time, not a literal key. The caller never puts the raw key
-  in the payload. Must appear in the operator's `AI_PLUGIN_ALLOWED_KEY_ENVS`
-  allowlist (see "Configuration") — otherwise a caller could name *any* env
-  var the process has, not just a provider key, and exfiltrate it via a
-  caller-controlled `base_url`. Not allowlisted, or unset → `ACTION_ERROR`;
+- `api_key_env` — name under which the `ai` process resolves the key at
+  call time, never a literal key. The caller never puts the raw key in
+  the payload. Resolution is vault-first: `ai` asks the `secrets` plugin's
+  vault for a secret stored under that exact name (`secret_set
+  {"name":"...","value":"sk-..."}` by the operator), and falls back to the
+  environment variable of the same name only when the vault has no
+  non-empty value. The vault wins when both exist. Must appear in the
+  operator's `AI_PLUGIN_ALLOWED_KEY_ENVS` allowlist (see "Configuration")
+  — otherwise a caller could name *any* secret/env var the process has,
+  not just a provider key, and exfiltrate it via a caller-controlled
+  `base_url`. Not allowlisted, or unset in both sources → `ACTION_ERROR`;
   the key value never appears in any error string.
 - `messages` — required, non-empty, `{role, content}` pairs.
 - `max_tokens` — optional, default `1024`, capped at `8192`.
@@ -74,7 +81,14 @@ failure, connection refused).
 
 `ai` reads no config file itself. The only configuration is environment
 variables set in the kernel's `config.yaml`, under this plugin's `env:`
-list — see `config.example.yaml` in this directory.
+list — see `config.example.yaml` in this directory. Provider keys are
+resolved vault-first: at call time `ai` asks the `secrets` plugin's vault
+for the key under the `api_key_env` name, and only falls back to the
+plugin's own environment variables when the vault has no non-empty value.
+The vault wins when both exist — so the operator may store keys in the
+vault instead of `env:` (via `secret_set {"name":"OPENAI_API_KEY","value":"sk-..."}`,
+requires the `secrets` plugin to be registered), or keep using `env:` as
+before.
 
 `AI_PLUGIN_ALLOWED_KEY_ENVS` is **required**: a comma-separated,
 exact-match allowlist of every env var name a caller's `api_key_env` may

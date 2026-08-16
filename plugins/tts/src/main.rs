@@ -41,10 +41,14 @@ fn manifest() -> PluginManifest {
         // too (matches plugin.json `permissions`; Manifest v2 per-action model).
         // `audio_stream`: `tts_speak` streams `AudioStreamChunk`s to a peer
         // (PERMISSION_AUDIO_STREAM, proto v1.6).
+        // `secrets`: cloud providers resolve their API keys from the
+        // `secrets` plugin's vault first (gated `secret_get`), and T-19
+        // requires callers of a gated action to hold its permission too.
         permissions: vec![
             "PERMISSION_NETWORK".into(),
             "PERMISSION_AUDIO_STREAM".into(),
             "PERMISSION_IPC_SEND".into(),
+            "PERMISSION_SECRETS".into(),
         ],
         actions: vec![
             "tts_synthesize".to_string(),

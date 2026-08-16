@@ -27,6 +27,18 @@ plugins:
       # key) and get its value sent straight into an outbound request
       # header to a caller-controlled base_url.
       - TTS_PLUGIN_ALLOWED_KEY_ENVS=OPENAI_API_KEY,ELEVENLABS_API_KEY
+      # --- Provider API keys (cloud providers only) ------------------------
+      # Callers reference a key by its env-var-style name, e.g.
+      #   "api_key_env": "OPENAI_API_KEY"
+      # and tts resolves that name secrets-first at call time:
+      #   1. the `secrets` plugin's vault — the operator stores the key in
+      #      tts's own vault under that exact name:
+      #        secret_set {"name":"OPENAI_API_KEY","value":"sk-..."}
+      #      (requires the `secrets` plugin to be registered and running;
+      #      tts declares PERMISSION_SECRETS to call its gated secret_get);
+      #   2. the env vars below — plaintext fallback.
+      # The vault wins when both hold a value. The key value itself is
+      # never logged and never accepted from the caller (name only).
       # OpenAI TTS key. Callers reference it via "api_key_env": "OPENAI_API_KEY".
       - OPENAI_API_KEY=sk-...
       # ElevenLabs key. "api_key_env": "ELEVENLABS_API_KEY".

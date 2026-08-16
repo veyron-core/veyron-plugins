@@ -42,9 +42,12 @@ Optional:
   default).
 - `sample_rate_hz`, `num_channels` — required with `format: "pcm"` and
   `provider: "sherpa"`.
-- `api_key_env` — name of an env var the `stt` process reads at call
-  time; `openai` only. Never a literal key. Must be on the operator's
-  `STT_PLUGIN_ALLOWED_KEY_ENVS` allowlist.
+- `api_key_env` — the lookup handle for the key, `openai` only. Never a
+  literal key. Must be on the operator's
+  `STT_PLUGIN_ALLOWED_KEY_ENVS` allowlist. Resolved secrets-first: `stt`
+  reads the key from its own `secrets` vault under this exact name
+  (`secret_get`), falling back to the same-named env var of the `stt`
+  process — the vault wins when both exist.
 - `base_url` — API base override; `openai` only. Default
   `https://api.openai.com/v1`.
 - `model` — `openai`: one of `whisper-1`, `gpt-4o-transcribe`,
@@ -82,7 +85,9 @@ Optional:
   per-request when the model family supports it (whisper).
 - **`openai`** — the upload goes through `network`'s `http_request`
   action as a multipart body. Needs `network` registered + running, an
-  allowlisted `api_key_env`, and the key present in the `stt` process env.
+  allowlisted `api_key_env`, and the key resolved from `stt`'s `secrets`
+  vault under that name (with the same-named env var as fallback — vault
+  wins).
 
 ### Examples
 
@@ -201,7 +206,7 @@ Callers can hit these:
 | `api_key_env must not be empty` | empty key env name |
 | `unknown openai model 'X' (known: ...)` | bad `model` for `openai` |
 | `api_key_env 'X' is not in the operator's STT_PLUGIN_ALLOWED_KEY_ENVS allowlist` | un-allowlisted key env name |
-| `environment variable X is not set` | allowlisted but unset key env |
+| `key 'X' is neither in the secrets vault nor set as an environment variable` | allowlisted but unresolvable key handle (not in the vault, env var unset) |
 | `pcm input requires num_channels` / `pcm input requires sample_rate_hz` | `sherpa` + `pcm` without metadata |
 | `sherpa accepts wav\|pcm input only` | `sherpa` with mp3/ogg audio |
 | `not a RIFF/WAVE file`, `wav missing fmt chunk`, `unsupported wav encoding: X`, `unsupported wav bit depth: X`, `wav missing data chunk` | broken wav upload |
