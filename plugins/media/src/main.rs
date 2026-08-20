@@ -15,7 +15,7 @@ use veyron_sdk::proto::{
 use veyron_sdk::{Plugin, VeyronClient, VeyronError};
 
 const PLUGIN_ID: &str = "media";
-const PLUGIN_VERSION: &str = "0.1.0";
+const PLUGIN_VERSION: &str = "0.0.2";
 
 struct MediaPlugin;
 
@@ -41,6 +41,8 @@ impl Plugin for MediaPlugin {
                 "media_volume".to_string(),
                 "media_status".to_string(),
                 "media_list_players".to_string(),
+                "media_shuffle".to_string(),
+                "media_loop".to_string(),
             ],
             ..Default::default()
         }
@@ -85,14 +87,46 @@ async fn handle_action_request(req: ActionRequest) -> ActionResponse {
         }
     };
 
-    let player = params
-        .get("player")
-        .and_then(Value::as_str)
-        .map(str::to_string);
+    let player: Option<String> = match params.get("player") {
+        None => None,
+        Some(Value::Null) => None,
+        Some(v) => match v.as_str() {
+            Some(s) if !s.trim().is_empty() => Some(s.to_string()),
+            Some(_) => {
+                return ActionResponse {
+                    action_id: req.action_id,
+                    status: ActionStatus::ActionError as i32,
+                    data_json: Vec::new(),
+                    error: "ERR_MEDIA_BAD_PARAMS: player must be non-empty string".to_string(),
+                };
+            }
+            None => {
+                return ActionResponse {
+                    action_id: req.action_id,
+                    status: ActionStatus::ActionError as i32,
+                    data_json: Vec::new(),
+                    error: "ERR_MEDIA_BAD_PARAMS: player must be string".to_string(),
+                };
+            }
+        },
+    };
 
     let result: Result<Value, String> = match req.action.as_str() {
         "media_play" => {
-            let uri = params.get("uri").and_then(Value::as_str).map(str::to_string);
+            let uri = match params.get("uri") {
+                None | Some(Value::Null) => None,
+                Some(v) => match v.as_str() {
+                    Some(s) => Some(s.to_string()),
+                    None => {
+                        return ActionResponse {
+                            action_id: req.action_id,
+                            status: ActionStatus::ActionError as i32,
+                            data_json: Vec::new(),
+                            error: "ERR_MEDIA_BAD_PARAMS: uri must be string".to_string(),
+                        };
+                    }
+                },
+            };
             mpris::play(player.as_deref(), uri.as_deref()).await
         }
         "media_pause" => mpris::pause(player.as_deref()).await,
@@ -102,16 +136,32 @@ async fn handle_action_request(req: ActionRequest) -> ActionResponse {
         "media_stop" => mpris::stop(player.as_deref()).await,
         "media_seek" => match params.get("position_ms").and_then(Value::as_u64) {
             Some(position_ms) => mpris::seek(player.as_deref(), position_ms).await,
-            None => Err("missing or invalid `position_ms`".to_string()),
+            None => Err("ERR_MEDIA_BAD_PARAMS: missing or invalid `position_ms`".to_string()),
         },
         "media_volume" => match parse_volume(&params) {
             Some(level) => mpris::set_volume(player.as_deref(), level).await,
-            None => Err("missing or invalid `level`".to_string()),
+            None => Err("ERR_MEDIA_BAD_PARAMS: missing or invalid `level`".to_string()),
         },
         "media_status" => mpris::status(player.as_deref()).await,
         "media_list_players" => mpris::list_players()
             .await
             .map(|players| serde_json::json!({ "players": players })),
+        "media_shuffle" => {
+            let enabled = params.get("enabled").and_then(Value::as_bool).or_else(|| {
+                params.get("shuffle").and_then(Value::as_bool)
+            });
+            match enabled {
+                Some(v) => mpris::set_shuffle(player.as_deref(), v).await,
+                None => Err("ERR_MEDIA_BAD_PARAMS: missing or invalid `enabled` (bool)".to_string()),
+            }
+        }
+        "media_loop" => {
+            let mode = params.get("mode").or_else(|| params.get("loop_status")).or_else(|| params.get("loop"));
+            match mode.and_then(Value::as_str) {
+                Some(s) => mpris::set_loop(player.as_deref(), s).await,
+                None => Err("ERR_MEDIA_BAD_PARAMS: missing or invalid `mode` (none/track/playlist)".to_string()),
+            }
+        }
         other => {
             return ActionResponse {
                 action_id: req.action_id,
@@ -143,8 +193,28 @@ async fn handle_action_request(req: ActionRequest) -> ActionResponse {
 /// `1` (integer) reads as 1% while `1.0` (float) reads as 100% — an
 /// inherent ambiguity of "fraction or percentage" that callers resolve by
 /// sending floats for fractions and integers for percentages.
+/// Integers are detected via `is_u64/is_i64` before `as_f64` so that `1`
+/// does not collapse to `1.0`.
 fn parse_volume(params: &Value) -> Option<f64> {
     let level = params.get("level")?;
+    // Integer path — percentages 0..100 (1 => 0.01). Must be checked before
+    // as_f64() because serde_json::Value::as_f64() returns Some for integers.
+    if level.is_u64() {
+        if let Some(n) = level.as_u64() {
+            if n <= 100 {
+                return Some(n as f64 / 100.0);
+            }
+            return None;
+        }
+    }
+    if level.is_i64() {
+        if let Some(n) = level.as_i64() {
+            if (0..=100).contains(&n) {
+                return Some(n as f64 / 100.0);
+            }
+            return None;
+        }
+    }
     if let Some(n) = level.as_f64() {
         if (0.0..=1.0).contains(&n) {
             return Some(n);
@@ -153,11 +223,6 @@ fn parse_volume(params: &Value) -> Option<f64> {
             return Some(n / 100.0);
         }
         return None;
-    }
-    if let Some(n) = level.as_u64() {
-        if n <= 100 {
-            return Some(n as f64 / 100.0);
-        }
     }
     None
 }

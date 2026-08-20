@@ -15,25 +15,32 @@ Local MPRIS playback control — one blessed path for `play/pause/seek/volume/st
 
 `zbus 4` async, `RealBackend` + `MockBackend`, 8 unit tests (parsing + mock), `permissions: []` (pure local IPC).
 
-## Known bugs — fix next (see BUGS.md)
+## v0.0.2 — shipped (bugfix + rate/shuffle/loop, 12 actions) — was 0.2.0, re-tagged as 0.0.2 per request
 
-- Firefox YouTube `Position` always 0 after seek — `Seek` with large offset clamps to 0, `SetPosition(o x)` fails `Invalid argument` on Firefox's synthetic trackId. Need fallback: try `SetPosition` with `TrackId` from Metadata, else `Seek`.
-- `media_status` position stale when `Position` property is 0 — should extrapolate `Position + Rate*(now - lastUpdate)` or poll `GetPosition` via `PropertiesChanged` subscription.
-- `media_play_pause` reports `playing` from immediate `PlaybackStatus` read — race (status updates async via `PropertiesChanged`). Should await signal or retry after 100ms.
-- Allowlist `MEDIA_PLUGIN_PLAYERS` parsed on every call via `std::env::var` — cache or reload via SIGHUP would be cleaner.
-- No event publishing (`media.state_changed` via `PERMISSION_EVENT_PUBLISH`) — `agent` has to poll.
+Fixes from `BUGS.md` verified on `firefox.instance_1_424` + `mpd` + `TelegramDesktop` (2026-08-20):
 
-## v1.1 — polish (no kernel change)
+- `seek` now `SetPosition(trackId, pos_us)` primary (ObjectPath validated), `Seek(delta)` fallback only on `NotSupported/UnknownMethod`; overflow guard `checked_mul(1000)`, `NoTrack` → `ERR_MEDIA_NO_TRACK` (fixes TECH-3, part of BUG-1).
+- `status` no longer swallows `PLAYER_VANISHED` — `PlaybackStatus/Volume/Position` propagate `ERR_MEDIA_PLAYER_VANISHED`, `Rate/Shuffle/LoopStatus` best-effort, `Rate` defaults to `1.0` while Playing. Adds `rate/shuffle/loop_status` to output (additive).
+- `play_pause` race fixed via 50/100/150ms poll (BUG-3).
+- `parse_volume` int vs float disambiguated (`is_u64/is_i64` before `as_f64`); `player`/`uri` param validation now `ERR_MEDIA_BAD_PARAMS` instead of silent fallback.
+- `parse_metadata` length accepts `i64/u64/i32/u32/i16/u16/u8` (was only i64/u64).
+- `metadata` cache per player (`OnceLock<Mutex<HashMap>>`) merges missing `length/title/track_id` on sparse Firefox updates (BUG-4).
+- `Rate` extrapolation in `status`: if `Position==0 && Playing && rate!=0 && cached_pos>0` → `cached_pos + elapsed*rate` (partial BUG-2).
+- Taxonomy unified: all D-Bus errors now `ERR_MEDIA_BUS_UNAVAILABLE / PLAYER_VANISHED / SEEK_FAILED / NOT_SUPPORTED / BAD_PARAMS`.
+- 14 tests (was 8) incl. `seek_no_track`, `seek_set_position`, `status_shuffle_loop_rate`, `metadata_cache`.
 
-- Fix `seek`: `SetPosition(trackId, pos_us)` primary, `Seek(delta)` fallback. TrackId normalization: `mpris:trackid` is `ObjectPath`, not plain string.
-- Add `PropertiesChanged` listener (zbus `Stream` for `org.freedesktop.DBus.Properties.PropertiesChanged` on `Player`), publish `media.state_changed` when declared `PERMISSION_EVENT_PUBLISH` (opt-in).
-- Handle `CanSeek/CanControl/CanPause` guards before calling — return `ERR_MEDIA_NOT_SUPPORTED` instead of forwarding raw D-Bus error.
-- Cover `media_*` with `bytes_written` style negative tests: empty `x:artist`, `x:artist` as single string vs array, `mpris:length` as `i64` vs `u64` vs `Variant`.
+Remaining gaps → see `BUGS.md` (`BUG-1 Firefox seek still high`, `BUG-2 stale Position full fix needs PropertiesChanged stream`).
+
+## v1.1 — polish (no kernel change, next)
+
+- `PropertiesChanged` listener (zbus `Stream` for `org.freedesktop.DBus.Properties.PropertiesChanged` on `Player`), publish `media.state_changed` when declared `PERMISSION_EVENT_PUBLISH` (opt-in). Needed for true BUG-2 fix (subscribe, cache `(pos,rate,updated_at)` and `Seeked(int64)` signal).
+- Handle `CanSeek/CanControl/CanPause/CanGoNext/CanGoPrevious` guards before calling — return `ERR_MEDIA_NOT_SUPPORTED` instead of forwarding raw D-Bus error.
+- Cover `media_*` with negative tests: empty `x:artist`, `x:artist` single string vs array, `mpris:length` variants.
+- `media_shuffle`/`media_loop` already landed in 0.2.0; add `media_seek_relative {offset_ms}` convenience.
 
 ## v1.2 — MPD + mpv hardening
 
-- MPD advertises `NoTrack` (`/TrackList/NoTrack`) when stopped — `seek` must reject on that trackId with `ERR_MEDIA_NO_TRACK`.
-- Add `media_queue`/`media_playlist` (TrackList `GetTracksMetadata` + `AddTrack`/`RemoveTrack`) for MPD, gated behind `MEDIA_PLUGIN_ENABLE_TRACKLIST=false` default (browsers don't implement TrackList).
+- MPD `NoTrack` handling done (0.2.0). Next: `media_queue`/`media_playlist` (TrackList `GetTracksMetadata` + `AddTrack`/`RemoveTrack`/`GoTo`) for MPD, gated behind `MEDIA_PLUGIN_ENABLE_TRACKLIST=false` default (browsers don't implement TrackList).
 
 ## v2 — remote providers (requires `network` + `secrets`)
 
