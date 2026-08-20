@@ -61,6 +61,13 @@
         "signature": "447fc3d5f8329483f74dacffc373bc0b86d19a975a0bcc1201d79eb0f6ac10563c6520137c44179e38d4022557a5ab98d04d813b79eba586e8b61d2df36c0f03",
         "min_kernel_version": "0.1.0",
         "max_kernel_version": "*"
+      },
+      "0.0.2": {
+        "archive_url": "https://raw.githubusercontent.com/veyron-core/veyron-plugins/main/dist/media/versions/0.0.2/media-0.0.2.zip",
+        "sha256": "b33672be08228bb0ede91a38c2b268cf2df693e67cf1ad35c14f896bf081ac63",
+        "signature": "02b64ff6bc9383127a8484af51e0b07ad705bcff249a3d2489ccc294e575f84dd2b60e3323afa3b57d941ff8ea549a308a51b73fa374a2f543436e6e32af8c06",
+        "min_kernel_version": "0.1.0",
+        "max_kernel_version": "*"
       }
     }
   },
