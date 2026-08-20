@@ -1,7 +1,7 @@
 {
   "meta": {
     "apiVersion": 2,
-    "lastUpdated": "2026-08-13"
+    "lastUpdated": "2026-08-20"
   },
   "revoked": [],
   "ai": {
@@ -38,6 +38,27 @@
         "archive_url": "https://raw.githubusercontent.com/veyron-core/veyron-plugins/main/dist/database/versions/0.1.0/database-0.1.0.zip",
         "sha256": "55550f4d7c51dfbade5db4161920a9802347b78bf3b875163f20abfc9aede756",
         "signature": "9e69b3b9b8a6d702676e490be7e6d7450f4eadbeca23f130537c6d101d21b5ebbae34952e7644ffc11af29dce62f84ce55423eff5587ebabd5d4bd07b01e0a0c",
+        "min_kernel_version": "0.1.0",
+        "max_kernel_version": "*"
+      }
+    }
+  },
+  "media": {
+    "name": "Media",
+    "description": "Local MPRIS media playback control - play/pause/seek/volume via session D-Bus",
+    "category": "media",
+    "tags": [
+      "mpris",
+      "media",
+      "playback"
+    ],
+    "status": "stable",
+    "source_url": "https://github.com/veyron-core/veyron-plugins/tree/main/plugins/media",
+    "versions": {
+      "0.1.0": {
+        "archive_url": "https://raw.githubusercontent.com/veyron-core/veyron-plugins/main/dist/media/versions/0.1.0/media-0.1.0.zip",
+        "sha256": "3643d9e4d6c03cb9846726c00880d30eaf829b3832bf1747e631ea2505861d5c",
+        "signature": "447fc3d5f8329483f74dacffc373bc0b86d19a975a0bcc1201d79eb0f6ac10563c6520137c44179e38d4022557a5ab98d04d813b79eba586e8b61d2df36c0f03",
         "min_kernel_version": "0.1.0",
         "max_kernel_version": "*"
       }
