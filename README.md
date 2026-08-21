@@ -28,6 +28,12 @@ even when prose says vynkor.
 | `sync` | `plugins/sync/` | `PERMISSION_STORAGE`, `PERMISSION_EVENT_PUBLISH` | Host-side sync state primitive (D-13): versioned SQLite KV + `sync_get_snapshot`/`sync_get`/`sync_set`/`sync_del`, publishes `sync.delta` events on every mutation. |
 | `sync-client` | `plugins/sync-client/` | `PERMISSION_SCHEDULER`, `PERMISSION_IPC_SEND` | Client-side mirror + heartbeat scheduler (D-13): subscribes to `sync.delta`, pulls `sync_get_snapshot` on (re)connect, pushes heartbeats via `sync_set` on a timer. |
 | `notify` | `plugins/notify/` | `PERMISSION_NOTIFY` | Desktop/system notifications via host binaries — `notify-send` (libnotify), `wall`, `espeak`; argv-only spawn, never a shell. v0.2: `speak: true` озвучка через `tts`-плагин + `silent: true` inbox (`notify_list`/`notify_mark_read`/`notify_delete`). See `plugins/notify/README.md`. |
+| `notes` | `plugins/notes/` | `PERMISSION_STORAGE`, `PERMISSION_EVENT_PUBLISH` | Note CRUD as a thin schema layer over `database` (`note:<id>` JSON docs, atomic id counter, tag filter/pagination), publishes `plugin.notes.changed`. Callers need no storage permission — `notes` holds it (T-19). See `plugins/notes/README.md`. |
+| `calendar` | `plugins/calendar/` | `PERMISSION_STORAGE`, `PERMISSION_EVENT_PUBLISH`, `PERMISSION_NOTIFY` | Event CRUD + opt-in reminders (`remind_before_ms`): timer scan fires once at-most (`late` flag after downtime), publishes `plugin.calendar.changed`/`.due`, best-effort `notify_send`; rescheduling resets the fired flag. See `plugins/calendar/README.md`. |
+
+Writing a new plugin? Start with [`docs/PLUGIN_AUTHORING.md`](docs/PLUGIN_AUTHORING.md) —
+the single-reader loop / RPC-proxy pattern, kernel routing facts (T-19/T-04),
+and the fake-kernel test harness.
 
 ## Registry
 
