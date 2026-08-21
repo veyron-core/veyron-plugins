@@ -30,6 +30,8 @@ file is the cross-plugin picture only.
 | `sync-client` | `plugins/sync-client/` | `sync` | client-side mirror + heartbeat scheduler (D-13): subscribes to `sync.delta`, pulls `sync_get_snapshot` on (re)connect to catch up, pushes its heartbeat into host state via `sync_set` on a timer (`PERMISSION_SCHEDULER`, `PERMISSION_IPC_SEND`) |
 | `notes` | `plugins/notes/` | `database` | note CRUD as a thin schema layer over `database`'s KV (`note:<id>` JSON docs, atomic id counter), publishes `plugin.notes.changed`; callers need no storage permission — `notes` holds it (T-19) |
 | `calendar` | `plugins/calendar/` | `database`, `notify` | event CRUD + reminders: opt-in `remind_before_ms`, timer scan fires once at-most (`late` flag after downtime), publishes `plugin.calendar.changed`/`.due`, best-effort `notify_send`; rescheduling resets the fired flag |
+| `media` | `plugins/media/` | — | local MPRIS playback control (`play/pause/next/prev/stop/seek/seek_relative/volume/status/list_players/shuffle/loop`), capability guards (`CanPlay`/…→`ERR_MEDIA_NOT_SUPPORTED`), background `PropertiesChanged`/`Seeked` watcher feeding the position cache; zbus session bus, `permissions: []`. v0.0.3: 13 actions, 42 tests |
+| `clipboard` | `plugins/clipboard/` | — | text clipboard read/write via host binaries — `wl-paste`/`wl-copy` (Wayland), `xclip`/`xsel` (X11); argv-only spawn, never a shell; size cap + per-spawn timeout (`PERMISSION_CLIPBOARD`, proto v1.4) |
 
 ## Planned
 
@@ -43,10 +45,8 @@ Dependency order — each row can start once everything in "depends on" ships.
 | `search` | web search (grounding, not just fetch) | `network` | `network` (caller of gated `http_request`) |
 | `email` | send/receive mail (SMTP/IMAP) | `network`, `secrets` (mailbox creds) | `network` (caller of gated `http_request`) |
 | `image` | image gen + vision (describe/OCR) | `network` (provider API), `secrets` | `network` (caller of gated `http_request`) |
-| `clipboard` | read/write system clipboard | — | `PERMISSION_CLIPBOARD` (defined, proto v1.4) |
 | `system` | query host info (battery, procs, volume, screen lock) | — | `PERMISSION_SYSTEM` (existing) — broad access, keep strict |
 | `launcher` | launch apps/games by name — Steam (`steam://rungameid/<id>`, reads `libraryfolders.vdf`/`appmanifest_*.acf`) as one provider, generic app launch as another | `filesystem` (read manifests) | `PERMISSION_LAUNCH` (defined, proto v1.4) |
-| `media` | control media playback (play/pause/skip/volume) — Spotify/YouTube API or MPRIS/media-keys locally | `network` (remote providers), `secrets` | `network` (caller of gated `http_request`) |
 | `screenshot` | capture screen/window, optional OCR | `image` (OCR) | `PERMISSION_SCREEN` (defined, proto v1.4) |
 | `window` | list/focus/switch/minimize/maximize open windows | — | `PERMISSION_SYSTEM` (existing, shares scope with `system`) |
 | `home` | home automation over a custom protocol to bare-metal devices (ESP32/Arduino) — not Home Assistant/MQTT, own wire format | `network` (or serial/BLE transport, TBD) | `PERMISSION_HOME` (defined, proto v1.4) |
