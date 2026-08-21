@@ -17,11 +17,12 @@ impl Provider for ElevenLabsProvider {
             .clone()
             .unwrap_or_else(|| DEFAULT_ELEVENLABS_BASE_URL.to_string());
         // ElevenLabs has no wav output; request.rs already restricts the
-        // format enum to mp3|pcm for this provider.
+        // format enum to mp3|pcm|ulaw for this provider.
         let output_format = match params.format {
             AudioFormat::Mp3 => "mp3_44100_128",
             AudioFormat::Pcm => "pcm_24000",
-            AudioFormat::Wav => unreachable!("elevenlabs rejects wav at parse time"),
+            AudioFormat::Ulaw => "ulaw_8000",
+            other => unreachable!("elevenlabs rejects {} at parse time", other.as_str()),
         };
         let body = serde_json::json!({
             "text": params.text,
@@ -56,6 +57,8 @@ impl Provider for ElevenLabsProvider {
                 1,
                 body.len() as f32 / (24000 * 2) as f32,
             ),
+            // ulaw_8000: 8 kHz, 8-bit mu-law, mono (1 byte per sample).
+            AudioFormat::Ulaw => (8000, 1, body.len() as f32 / 8000.0),
             _ => (0, 0, 0.0),
         };
         Ok(AudioResult {
@@ -132,6 +135,25 @@ mod tests {
         let result = ElevenLabsProvider.parse_response(&body, AudioFormat::Pcm).unwrap();
         assert_eq!(result.format, "pcm");
         assert_eq!(result.sample_rate_hz, 24000);
+        assert_eq!(result.num_channels, 1);
+        assert_eq!(result.duration_seconds, 1.0);
+    }
+
+    #[test]
+    fn build_http_request_ulaw_output_format() {
+        let mut p = params();
+        p.format = AudioFormat::Ulaw;
+        let req = ElevenLabsProvider.build_http_request(&p, "sk-11labs");
+        assert!(req.url.ends_with("output_format=ulaw_8000"));
+    }
+
+    #[test]
+    fn parse_ulaw_reports_8khz_rate() {
+        // 8000 Hz mono 8-bit mu-law -> 8000 bytes = 1.0 s
+        let body = vec![0xFFu8; 8000];
+        let result = ElevenLabsProvider.parse_response(&body, AudioFormat::Ulaw).unwrap();
+        assert_eq!(result.format, "ulaw");
+        assert_eq!(result.sample_rate_hz, 8000);
         assert_eq!(result.num_channels, 1);
         assert_eq!(result.duration_seconds, 1.0);
     }

@@ -85,6 +85,10 @@ pub enum AudioFormat {
     Mp3,
     Wav,
     Pcm,
+    Opus,
+    Aac,
+    Flac,
+    Ulaw,
 }
 
 impl AudioFormat {
@@ -93,6 +97,10 @@ impl AudioFormat {
             AudioFormat::Mp3 => "mp3",
             AudioFormat::Wav => "wav",
             AudioFormat::Pcm => "pcm",
+            AudioFormat::Opus => "opus",
+            AudioFormat::Aac => "aac",
+            AudioFormat::Flac => "flac",
+            AudioFormat::Ulaw => "ulaw",
         }
     }
 }
@@ -174,19 +182,24 @@ pub fn parse_request(params_json: &[u8]) -> Result<SynthesizeParams, String> {
     let format = match (provider, raw.format.as_deref()) {
         (Provider::Sherpa, None | Some("wav")) => AudioFormat::Wav,
         (Provider::Sherpa, Some("pcm")) => AudioFormat::Pcm,
+        (Provider::Sherpa, Some("mp3")) => AudioFormat::Mp3,
         (Provider::Sherpa, Some(other)) => {
-            return Err(format!("sherpa supports formats wav|pcm, got: {other}"))
+            return Err(format!("sherpa supports formats wav|pcm|mp3, got: {other}"))
         }
         (Provider::OpenAi, None | Some("mp3")) => AudioFormat::Mp3,
         (Provider::OpenAi, Some("wav")) => AudioFormat::Wav,
         (Provider::OpenAi, Some("pcm")) => AudioFormat::Pcm,
+        (Provider::OpenAi, Some("opus")) => AudioFormat::Opus,
+        (Provider::OpenAi, Some("aac")) => AudioFormat::Aac,
+        (Provider::OpenAi, Some("flac")) => AudioFormat::Flac,
         (Provider::OpenAi, Some(other)) => {
-            return Err(format!("openai supports formats mp3|wav|pcm, got: {other}"))
+            return Err(format!("openai supports formats mp3|wav|pcm|opus|aac|flac, got: {other}"))
         }
         (Provider::ElevenLabs, None | Some("mp3")) => AudioFormat::Mp3,
         (Provider::ElevenLabs, Some("pcm")) => AudioFormat::Pcm,
+        (Provider::ElevenLabs, Some("ulaw")) => AudioFormat::Ulaw,
         (Provider::ElevenLabs, Some(other)) => {
-            return Err(format!("elevenlabs supports formats mp3|pcm, got: {other}"))
+            return Err(format!("elevenlabs supports formats mp3|pcm|ulaw, got: {other}"))
         }
     };
 
@@ -376,9 +389,17 @@ mod tests {
     }
 
     #[test]
-    fn sherpa_rejects_mp3_format() {
+    fn sherpa_accepts_mp3_format() {
         let mut body = valid_sherpa_json();
         body["format"] = "mp3".into();
+        let params = parse_request(body.to_string().as_bytes()).unwrap();
+        assert_eq!(params.format, AudioFormat::Mp3);
+    }
+
+    #[test]
+    fn sherpa_rejects_opus_format() {
+        let mut body = valid_sherpa_json();
+        body["format"] = "opus".into();
         let err = parse_request(body.to_string().as_bytes()).unwrap_err();
         assert!(err.contains("sherpa supports formats"), "error was: {err}");
     }
@@ -436,6 +457,59 @@ mod tests {
             err.contains("elevenlabs supports formats"),
             "error was: {err}"
         );
+    }
+
+    #[test]
+    fn openai_accepts_opus_aac_flac() {
+        for f in ["opus", "aac", "flac"] {
+            let mut body = valid_openai_json();
+            body["format"] = f.into();
+            let params = parse_request(body.to_string().as_bytes()).unwrap();
+            assert_eq!(params.format.as_str(), f);
+        }
+    }
+
+    #[test]
+    fn elevenlabs_accepts_ulaw() {
+        let mut body = serde_json::json!({
+            "provider": "elevenlabs",
+            "text": "hi",
+            "voice": "x",
+            "api_key_env": "ELEVENLABS_API_KEY",
+        });
+        body["format"] = "ulaw".into();
+        let params = parse_request(body.to_string().as_bytes()).unwrap();
+        assert_eq!(params.format, AudioFormat::Ulaw);
+    }
+
+    #[test]
+    fn new_formats_rejected_by_wrong_provider() {
+        let cases: [(&str, &str); 6] = [
+            ("sherpa", "opus"),
+            ("sherpa", "aac"),
+            ("sherpa", "flac"),
+            ("sherpa", "ulaw"),
+            ("openai", "ulaw"),
+            ("elevenlabs", "opus"),
+        ];
+        for (provider, format) in cases {
+            let mut body = match provider {
+                "sherpa" => valid_sherpa_json(),
+                "openai" => valid_openai_json(),
+                _ => serde_json::json!({
+                    "provider": "elevenlabs",
+                    "text": "hi",
+                    "voice": "x",
+                    "api_key_env": "ELEVENLABS_API_KEY",
+                }),
+            };
+            body["format"] = format.into();
+            let err = parse_request(body.to_string().as_bytes()).unwrap_err();
+            assert!(
+                err.contains(&format!("{provider} supports formats")),
+                "provider {provider} + format {format}: error was {err}"
+            );
+        }
     }
 
     #[test]

@@ -36,8 +36,8 @@
           },
           "format": {
             "type": "string",
-            "enum": ["wav", "pcm", "mp3", "ogg"],
-            "description": "Per-provider subset: sherpa wav|pcm (default wav); openai mp3|wav|pcm (default mp3); elevenlabs mp3|pcm (default mp3)."
+            "enum": ["wav", "pcm", "mp3", "opus", "aac", "flac", "ulaw"],
+            "description": "Per-provider subset: sherpa wav|pcm|mp3 (default wav); openai mp3|wav|pcm|opus|aac|flac (default mp3); elevenlabs mp3|pcm|ulaw (default mp3)."
           },
           "speed": {
             "type": "number",
@@ -67,8 +67,8 @@
       "output": {
         "type": "object",
         "properties": {
-          "format": { "type": "string", "enum": ["wav", "pcm", "mp3"] },
-          "sample_rate_hz": { "type": "integer", "description": "0 when the container can't carry it (MP3 from a cloud provider)." },
+          "format": { "type": "string", "enum": ["wav", "pcm", "mp3", "opus", "aac", "flac", "ulaw"] },
+          "sample_rate_hz": { "type": "integer", "description": "0 when the container can't carry it (mp3/opus/aac/flac from a cloud provider)." },
           "num_channels": { "type": "integer", "description": "0 when the container can't carry it." },
           "duration_seconds": { "type": "number", "description": "0 when the container can't carry it." },
           "audio_base64": { "type": "string", "description": "Base64-encoded audio bytes." }

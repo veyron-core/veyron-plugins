@@ -21,7 +21,7 @@ file is the cross-plugin picture only.
 | `network` | `plugins/network/` | — | outbound HTTP, `PERMISSION_NETWORK`, SSRF-guarded. v0.4: gzip/brotli/deflate/zstd, `multipart` bodies, `network_stats`, `cache_ttl_ms`, `use_cookies` |
 | `ai` | `plugins/ai/` | `network` | LLM chat completion (anthropic/openai-compatible), declares `network` — caller of `network`'s gated `http_request` (T-19) |
 | `database` | `plugins/database/` | — | KV/SQL storage primitive, `PERMISSION_STORAGE`, per-caller SQLite file isolation. v0.3: `db_incr`/`db_keys`/`db_append`/`db_patch`, KV TTL (`ttl_ms`), `db.changed` change events |
-| `tts` | `plugins/tts/` | `network` (cloud providers) | text-to-speech — local ONNX (sherpa: Kokoro/Piper) in-process + openai/elevenlabs via `network`, declares `network` (caller of gated `http_request`). **D-12:** `tts_speak` streams Opus `AudioStreamChunk`s to a peer (`PERMISSION_AUDIO_STREAM`) |
+| `tts` | `plugins/tts/` | `network` (cloud providers) | text-to-speech — local ONNX (sherpa: Kokoro/Piper) in-process + openai/elevenlabs via `network`, declares `network` (caller of gated `http_request`). **D-12:** `tts_speak` streams Opus `AudioStreamChunk`s to a peer (`PERMISSION_AUDIO_STREAM`). Formats batch: `opus`/`aac`/`flac` for openai, `ulaw_8000` for elevenlabs, local mp3 encode (LAME) for sherpa |
 | `stt` | `plugins/stt/` | `network` (cloud provider) | speech-to-text — local ONNX (sherpa: zipformer/whisper) in-process + openai audio via `network`, declares `network` (caller of gated `http_request`). **D-12:** `stt_listen_start`/`stt_listen_stop` stream PCM in and publish a `stt_text` event (`PERMISSION_AUDIO_STREAM`, `PERMISSION_EVENT_PUBLISH`) |
 | `secrets` | `plugins/secrets/` | — | encrypted credential/API-key vault (`secret_get`/`secret_set`/`secret_delete`/`secret_list`), ChaCha20-Poly1305 per-caller `.vault` files, master key via `SECRETS_PLUGIN_MASTER_KEY`, `PERMISSION_SECRETS` (proto v1.4) |
 | `gated-write` | `plugins/gated-write/` | — | reference impl of the D-09 confirmation gate: risky file write split into `request_write` (any caller, `requires_confirmation`) + `confirm_write` (allowlisted callers only), writes confined to a data dir |
@@ -32,6 +32,8 @@ file is the cross-plugin picture only.
 | `calendar` | `plugins/calendar/` | `database`, `notify` | event CRUD + reminders: opt-in `remind_before_ms`, timer scan fires once at-most (`late` flag after downtime), publishes `plugin.calendar.changed`/`.due`, best-effort `notify_send`; rescheduling resets the fired flag |
 | `media` | `plugins/media/` | — | local MPRIS playback control (`play/pause/next/prev/stop/seek/seek_relative/volume/status/list_players/shuffle/loop`), capability guards (`CanPlay`/…→`ERR_MEDIA_NOT_SUPPORTED`), background `PropertiesChanged`/`Seeked` watcher feeding the position cache; zbus session bus, `permissions: []`. v0.0.3: 13 actions, 42 tests |
 | `clipboard` | `plugins/clipboard/` | — | text clipboard read/write via host binaries — `wl-paste`/`wl-copy` (Wayland), `xclip`/`xsel` (X11); argv-only spawn, never a shell; size cap + per-spawn timeout (`PERMISSION_CLIPBOARD`, proto v1.4) |
+| `filesystem` | `plugins/filesystem/` | — | sandboxed file read/write + read-only browse (`fs_list`/`fs_read`/`fs_write`) behind a default-deny allowlist of absolute roots (`FILES_PLUGIN_ALLOWED_ROOTS`); deepest-existing-ancestor canonicalize blocks `..` traversal and symlink escapes; write refuses symlink/dir/root targets (`PERMISSION_FILES_READ`/`WRITE`). v0.1.0: 33 tests |
+| `search` | `plugins/search/` | `network`, `secrets` | web search (`web_search`) via brave/tavily adapters routed through `network`'s gated `http_request` (T-19 caller), keys vault-first via `secrets`, `SEARCH_PLUGIN_ALLOWED_KEY_ENVS` default-deny allowlist; normalized `{query, results[{title,url,snippet}]}`. v0.1.0: 34 tests incl. fake-kernel end-to-end |
 
 ## Planned
 
@@ -39,10 +41,8 @@ Dependency order — each row can start once everything in "depends on" ships.
 
 | Plugin | Purpose | Depends on | Permissions |
 |---|---|---|---|
-| `filesystem` | sandboxed file read/write + read-only browse (`ls`/`cat` equivalents: `fs_list`/`fs_read`) — no exec, no shell | — | `PERMISSION_FILES_READ`/`PERMISSION_FILES_WRITE` (existing) |
 | `scheduler` | fire an action/event once after a delay, or repeatedly on a cron expr | `database` (persist schedule state across restarts) | `PERMISSION_SCHEDULER` (existing) |
 | `vector-db` | embedding upsert/similarity search (`vec_upsert`/`vec_query`) | — | own storage backend, standalone |
-| `search` | web search (grounding, not just fetch) | `network` | `network` (caller of gated `http_request`) |
 | `email` | send/receive mail (SMTP/IMAP) | `network`, `secrets` (mailbox creds) | `network` (caller of gated `http_request`) |
 | `image` | image gen + vision (describe/OCR) | `network` (provider API), `secrets` | `network` (caller of gated `http_request`) |
 | `system` | query host info (battery, procs, volume, screen lock) | — | `PERMISSION_SYSTEM` (existing) — broad access, keep strict |
@@ -62,9 +62,10 @@ reminder scan is an internal timer loop; migrating firing to the future
 `scheduler` plugin stays an open option (`plugins/calendar/ROADMAP.md`).
 
 Under the Manifest v2 data-driven permission model (§3), any plugin that
-invokes `network`'s gated `http_request` — the shipped `ai`/`tts`/`stt` and
-the planned `search`/`email`/`image`/`media` — declares `PERMISSION_NETWORK`
-itself: T-19 requires the *caller* of a gated action to hold its permission,
+invokes `network`'s gated `http_request` — the shipped
+`ai`/`tts`/`stt`/`search` and the planned `email`/`image` — declares
+`PERMISSION_NETWORK` itself: T-19 requires the *caller* of a gated action to
+hold its permission,
 and the per-action `permission` in `network`'s manifest makes that check
 data-driven ("any caller without the permission is denied").
 
