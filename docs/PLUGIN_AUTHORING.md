@@ -101,3 +101,43 @@ real serve loop without a live kernel (SDK test pattern, used by
   `config_schema`, env vars named `<PLUGIN>_PLUGIN_*`.
 - Per-plugin docs: `README.md` (contract) + `ROADMAP.md` (non-goals) — see
   any shipped plugin for the pattern.
+
+## 5. Sandbox path resolution (filesystem)
+
+The filesystem plugin's jail (`plugins/filesystem/src/sandbox.rs`) is the
+reference for any plugin that must confine I/O to operator-named roots.
+The shape that survived review and tests:
+
+- **Default-deny roots**: comma-separated absolute dirs from an env var;
+  unset/empty rejects every action with an error that names the variable.
+  Relative/nonexistent roots are logged loudly at startup and skipped.
+- **Resolve = canonicalize deepest *existing* ancestor, then textually
+  re-append the non-existing remainder**, then require the result to be
+  component-wise (`Path::starts_with`, never string prefix) inside a
+  canonical root. Canonicalizing the existing portion resolves every symlink
+  component, so file symlinks pointing outside a root and symlinked dir
+  components are rejected by the containment check itself — no separate
+  symlink walk needed.
+- **Reject `..` that survives into the remainder** (the textual join can't
+  resolve it). `..` inside the existing portion is harmless: canonicalize
+  already folded it. Gotcha that cost a test failure: `Path::file_name()`
+  returns `None` for paths terminating in `..` — detect that case via
+  `components().next_back() == Some(Component::ParentDir)`, not via
+  `file_name()`.
+- **Writes need one extra check**: after resolution, `symlink_metadata` the
+  final component and refuse symlinks (a dangling symlink canonicalizes as
+  its parent, so containment alone would let a write follow it outside).
+- Document TOCTOU (check-then-use symlink swap) as a known non-goal unless
+  you're prepared to go openat2/`RESOLVE_BENEATH`.
+
+## 6. Testing handlers that read process env
+
+Allowlist-style config (`*_ALLOWED_KEY_ENVS`, sandbox roots) is read from
+process env inside handlers, which makes naive integration tests racy:
+`#[tokio::test]` runs tests in parallel threads sharing one environment.
+The search plugin's fake-kernel test shows the cheap fix: set every env var
+once through a `static OnceLock<()>` helper called at the top of each test,
+choosing values that work for all tests simultaneously (one fixed allowlist
+covering both providers' key names; a decoy env value to prove vault-wins;
+an unlisted name for the rejection case). No locks, no cleanup, no races —
+and the vault-vs-env precedence gets tested for free.
