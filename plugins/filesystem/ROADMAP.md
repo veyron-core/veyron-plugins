@@ -39,7 +39,8 @@ outbound RPC, no network, no secrets — plain `std::fs` behind the sandbox in
   or re-verification after open; revisit if multi-writer roots become a
   real deployment shape.
 - **No watch/notification** — file-change events belong to a future design,
-  not bolted onto this plugin.
+  not bolted onto this plugin (sketched in "Future" below — they land here,
+  same roots/permission model, once the subscription lifecycle is designed).
 
 ## Near-term ideas
 
@@ -54,3 +55,18 @@ outbound RPC, no network, no secrets — plain `std::fs` behind the sandbox in
 
 - `launcher` (root `ROADMAP.md` Planned table): reading app manifests /
   `.desktop` files via `fs_read` once its own permission model lands.
+
+## Future (unscheduled)
+
+- **`fs_watch_start` / `fs_watch_stop` + `fs.changed` events** — inotify
+  over the allowed roots, published through the kernel event bus
+  (`PERMISSION_EVENT_PUBLISH`; event-loop precedent: calendar's reminder
+  scan, media's D-Bus watcher). The automation trigger source: "new file
+  in Downloads → OCR → notes". Deliberately not in v1 (see non-goals) —
+  wants a design pass on subscription lifecycle first: who owns the
+  watcher, what happens on plugin restart, event coalescing for bursty
+  writes.
+- **Trash actions** — freedesktop-trash-aware `fs_trash_list` /
+  `fs_trash_restore` / `fs_trash_purge`, scoped to the same allowed roots:
+  a reversible delete without opening a destructive surface. The middle
+  ground between the v1 non-goal on delete/rename and real caller needs.
