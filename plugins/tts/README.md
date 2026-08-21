@@ -43,6 +43,15 @@ The local provider loads a model into RAM at first use; size `max_vmem_mb`
 above the model size (Kokoro f32 ≈ 310 MB, int8 ≈ 88 MB; piper medium ≈
 100 MB). See `config.example.yaml`.
 
+### Build dependency: libmp3lame
+
+`tts` links the C LAME encoder via the `mp3lame-encoder` crate (pinned
+`=0.2.5`, LGPL-3.0) to encode sherpa's PCM into MP3 for `format: "mp3"`.
+LAME is a **build-time** C dependency: the `libmp3lame` development
+library and headers must be installed to compile (`libmp3lame-dev` on
+Debian/Ubuntu, `lame-devel` on Fedora). At runtime the plugin links the
+shared `libmp3lame.so` — no separate process or daemon.
+
 ## Action: `tts_synthesize`
 
 Request (`ActionRequest.params_json`):
@@ -67,8 +76,9 @@ Request (`ActionRequest.params_json`):
   plugin's vault first (under that exact name), then falls back to the
   process environment. Must be on the operator's
   `TTS_PLUGIN_ALLOWED_KEY_ENVS` allowlist. Ignored for `sherpa`.
-- `format` — optional. `sherpa`: `wav` (default) | `pcm`;
-  `openai`: `mp3` (default) | `wav` | `pcm`; `elevenlabs`: `mp3` (default) | `pcm`.
+- `format` — optional. `sherpa`: `wav` (default) | `pcm` | `mp3`;
+  `openai`: `mp3` (default) | `wav` | `pcm` | `opus` | `aac` | `flac`;
+  `elevenlabs`: `mp3` (default) | `pcm` | `ulaw`.
 - `speed` — optional, `0.25`..=`4.0`, default `1.0`.
 - `timeout_ms` — optional, default/cap `60000`. Cloud requests are
   additionally capped at `network`'s own 30 s HTTP limit.
@@ -90,8 +100,11 @@ providers:
 ```
 
 `sample_rate_hz` / `num_channels` / `duration_seconds` are `0` when the
-container can't carry them (MP3 from a cloud provider); WAV and raw-PCM
-bodies always carry real values. Decode `audio_base64` for the bytes.
+container can't carry them (mp3/opus/aac/flac from a cloud provider);
+`ulaw` reports `sample_rate_hz` 8000 (its fixed rate). WAV, raw-PCM, and
+sherpa-local mp3 bodies carry real values (sherpa knows the source rate,
+channels, and duration from the PCM it encoded). Decode `audio_base64`
+for the bytes.
 
 Errors → `ACTION_ERROR` with a human-readable message: malformed/missing
 request fields, unknown voice, model load failure (missing/wrong model
@@ -198,9 +211,9 @@ cached for the process lifetime.
 
 ## Testing
 
-`cargo test` — 64 unit tests, no live network and no model files required
+`cargo test` — 75 unit tests, no live network and no model files required
 (providers are tested against fixture audio/JSON; sherpa config assembly
-is tested without loading a real model; the Opus encoder is tested with
-encode/decode round-trips). End-to-end behavior was verified
-against a real kernel + `network` + `tts` + local Kokoro stack; there's no
-automated integration test for that yet.
+is tested without loading a real model; the Opus and MP3 encoders are
+tested with encode/decode and frame-sync checks). End-to-end behavior was
+verified against a real kernel + `network` + `tts` + local Kokoro stack;
+there's no automated integration test for that yet.

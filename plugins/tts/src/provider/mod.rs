@@ -8,6 +8,7 @@
 //!     HTTP at all. See `crate::provider::sherpa`.
 
 pub mod elevenlabs;
+pub mod mp3;
 pub mod openai;
 pub mod opus;
 pub mod sherpa;

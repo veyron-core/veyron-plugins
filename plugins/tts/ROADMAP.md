@@ -122,9 +122,10 @@ parsing. sherpa config assembly tested without loading a real model.
 - **Google Cloud TTS + Azure adapters** — same `Provider` trait, one file
   each; GCP needs its own auth path (bearer from a service account), so
   deferred past the two key-based clouds.
-- **More output formats** — `opus`/`aac`/`flac` for `openai`; `ulaw` for
-  `elevenlabs`; a `mp3` encode path for local output (lame/`mp3lame`
-  crate) so `sherpa` can serve MP3 too.
+- **More output formats** — ✅ done (2026-08-21): `opus`/`aac`/`flac` for
+  `openai`; `ulaw` (→ `ulaw_8000`) for `elevenlabs`; a `mp3` encode path
+  for local output (`mp3lame-encoder` crate → LAME) so `sherpa` can serve
+  MP3 too.
 - **Streaming synthesis** — sherpa-onnx supports generation callbacks
   (per-sentence audio as it's produced); today's model is one
   `ActionRequest` → one `ActionResponse`, so v1 buffers the full clip.

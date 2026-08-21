@@ -26,7 +26,7 @@ Turn text into audio bytes.
 | `text` | yes | 1–4000 chars; trimmed |
 | `voice` | yes | provider-specific id (below) |
 | `api_key_env` | cloud only | lookup handle (env-var-style name) for the provider key — `tts` reads it from the `secrets` plugin's vault first, then falls back to its own env; must be on the operator's `TTS_PLUGIN_ALLOWED_KEY_ENVS` allowlist. Never pass a literal key. |
-| `format` | no | `sherpa`: `wav` (default) \| `pcm`. `openai`: `mp3` (default) \| `wav` \| `pcm`. `elevenlabs`: `mp3` (default) \| `pcm` |
+| `format` | no | `sherpa`: `wav` (default) \| `pcm` \| `mp3`. `openai`: `mp3` (default) \| `wav` \| `pcm` \| `opus` \| `aac` \| `flac`. `elevenlabs`: `mp3` (default) \| `pcm` \| `ulaw` |
 | `speed` | no | `0.25`–`4.0`, default `1.0`, clamped |
 | `timeout_ms` | no | default 30000, capped at 60000; cloud hops additionally capped at 30000 by `network` |
 | `base_url` | no | override the provider endpoint |
@@ -45,10 +45,14 @@ Turn text into audio bytes.
 ```
 
 - `audio_base64` — standard base64 of the audio bytes; decode and write to
-  a file (`.wav` / `.mp3` / `.pcm` per `format`) or pipe to a player.
-- `sample_rate_hz` / `num_channels` — real for `wav`/`pcm`; `0` for MP3
-  bodies (the container carries no header we trust).
-- `duration_seconds` — real for `wav`/`pcm`; `0` for MP3.
+  a file (`.wav` / `.mp3` / `.pcm` / `.opus` / `.aac` / `.flac` / `.ulaw`
+  per `format`) or pipe to a player.
+- `sample_rate_hz` / `num_channels` — real for `wav`/`pcm` and for
+  sherpa-local `mp3` (the source rate is known); `0` for `mp3`/`opus`/
+  `aac`/`flac` from a cloud provider (the container carries no header we
+  trust). `ulaw` reports `sample_rate_hz` 8000 (its fixed rate).
+- `duration_seconds` — real for `wav`/`pcm` and sherpa-local `mp3`; `0`
+  for cloud `mp3`/`opus`/`aac`/`flac`.
 
 ### Voices per provider
 
@@ -113,6 +117,41 @@ ElevenLabs, PCM at 24 kHz:
   "voice": "21m00Tcm4TlvDq8ikWAM",
   "api_key_env": "ELEVENLABS_API_KEY",
   "format": "pcm"
+}
+```
+
+Local Kokoro, MP3 out (PCM → LAME encode in-process):
+
+```json
+{
+  "provider": "sherpa",
+  "text": "Offline and compact.",
+  "voice": "af_heart",
+  "format": "mp3"
+}
+```
+
+ElevenLabs, μ-law at 8 kHz (telephony/Twilio):
+
+```json
+{
+  "provider": "elevenlabs",
+  "text": "Hello from the phone network.",
+  "voice": "21m00Tcm4TlvDq8ikWAM",
+  "api_key_env": "ELEVENLABS_API_KEY",
+  "format": "ulaw"
+}
+```
+
+OpenAI, Opus out (low-latency streaming):
+
+```json
+{
+  "provider": "openai",
+  "text": "Hello from the cloud.",
+  "voice": "nova",
+  "api_key_env": "OPENAI_API_KEY",
+  "format": "opus"
 }
 ```
 
@@ -225,7 +264,9 @@ string.
 | `missing required field: text` / `text must not be empty` / `text exceeds max length of 4000 chars` | bad `text` |
 | `missing required field: voice` / `voice must not be empty` | bad `voice` |
 | `unknown openai voice 'X' (known: ...)` | bad openai voice |
-| `sherpa supports formats wav\|pcm, got: X` | bad format for provider |
+| `sherpa supports formats wav\|pcm\|mp3, got: X` | bad format for sherpa |
+| `openai supports formats mp3\|wav\|pcm\|opus\|aac\|flac, got: X` | bad format for openai |
+| `elevenlabs supports formats mp3\|pcm\|ulaw, got: X` | bad format for elevenlabs |
 | `missing required field: api_key_env` / `api_key_env must not be empty` | cloud provider without a key reference |
 | `api_key_env 'X' is not in the operator's TTS_PLUGIN_ALLOWED_KEY_ENVS allowlist` | key env not allowlisted |
 | `key 'X' is neither in the secrets vault nor set as an environment variable` | allowlisted key handle absent from both the secrets vault and the env |

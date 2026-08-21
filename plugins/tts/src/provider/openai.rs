@@ -20,6 +20,10 @@ impl Provider for OpenAiProvider {
             AudioFormat::Mp3 => "mp3",
             AudioFormat::Wav => "wav",
             AudioFormat::Pcm => "pcm",
+            AudioFormat::Opus => "opus",
+            AudioFormat::Aac => "aac",
+            AudioFormat::Flac => "flac",
+            AudioFormat::Ulaw => unreachable!("openai rejects ulaw at parse time"),
         };
         let body = serde_json::json!({
             "model": params.model.clone().unwrap_or_else(|| DEFAULT_OPENAI_MODEL.to_string()),
@@ -56,8 +60,11 @@ impl Provider for OpenAiProvider {
                 let duration = wav_duration_seconds(body).unwrap_or(0.0);
                 (rate, channels as u8, duration)
             }
-            // No reliable header in the container for MP3 here.
-            AudioFormat::Mp3 => (0, 0, 0.0),
+            // No reliable header in the container for MP3/opus/aac/flac here.
+            AudioFormat::Mp3 | AudioFormat::Opus | AudioFormat::Aac | AudioFormat::Flac => {
+                (0, 0, 0.0)
+            }
+            AudioFormat::Ulaw => unreachable!("openai rejects ulaw at parse time"),
         };
         Ok(AudioResult {
             format: format.as_str().to_string(),
@@ -145,5 +152,35 @@ mod tests {
         assert_eq!(result.format, "pcm");
         assert_eq!(result.sample_rate_hz, 24000);
         assert_eq!(result.duration_seconds, 2.0);
+    }
+
+    #[test]
+    fn build_http_request_passes_new_formats_through() {
+        for (format, value) in [
+            (AudioFormat::Opus, "opus"),
+            (AudioFormat::Aac, "aac"),
+            (AudioFormat::Flac, "flac"),
+        ] {
+            let mut p = params();
+            p.format = format;
+            let req = OpenAiProvider.build_http_request(&p, "sk-test");
+            assert!(
+                req.body.contains(&format!("\"response_format\":\"{value}\"")),
+                "body was: {}",
+                req.body
+            );
+        }
+    }
+
+    #[test]
+    fn parse_new_container_formats_report_zero_metadata() {
+        for format in [AudioFormat::Opus, AudioFormat::Aac, AudioFormat::Flac] {
+            let body = vec![0xFF, 0x00, 0x01, 0x02];
+            let result = OpenAiProvider.parse_response(&body, format).unwrap();
+            assert_eq!(result.format, format.as_str());
+            assert_eq!(result.sample_rate_hz, 0);
+            assert_eq!(result.num_channels, 0);
+            assert_eq!(result.duration_seconds, 0.0);
+        }
     }
 }
