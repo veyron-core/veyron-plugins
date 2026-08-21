@@ -7,12 +7,13 @@ declares no permissions.
 
 ## Status
 
-v0.0.2 — local MPRIS via `zbus` session bus. 12 actions wired through
+v0.0.3 — local MPRIS via `zbus` session bus. 13 actions wired through
 `MprisBackend` (real `RealBackend` + `MockBackend` for tests). See
 `CHANGELOG.md` for history.
 
 **v0.1.0** — 10 actions (`play/pause/play_pause/next/prev/stop/seek/volume/status/list`) via `Seek(offset)` only.
 **v0.0.2** — bugfix + minor features: `SetPosition` primary for seek, rate/shuffle/loop in `status`, metadata cache, error taxonomy `ERR_MEDIA_*` unified. See `BUGS.md` for fixed vs remaining.
+**v0.0.3** — capability guards (`CanPlay`/`CanPause`/`CanGoNext`/`CanGoPrevious`/`CanSeek`/`CanControl` → `ERR_MEDIA_NOT_SUPPORTED`), D-Bus error reclassification (`No such property` is no longer misreported as `PLAYER_VANISHED`), background signal watcher (`PropertiesChanged` + `Seeked` feed the position cache — full BUG-2 fix for compliant players), `media_seek_relative`.
 
 Parsing covers `xesam:title/artist/album`, `mpris:length/trackid/artUrl`, `PlaybackStatus`,
 `Volume`, `Position`, `Rate`, `Shuffle`, `LoopStatus` with `ERR_MEDIA_*` error taxonomy.
@@ -35,7 +36,8 @@ Parsing covers `xesam:title/artist/album`, `mpris:length/trackid/artUrl`, `Playb
 | `media_next` | `player?` | `{ ok }` |
 | `media_prev` | `player?` | `{ ok }` |
 | `media_stop` | `player?` | `{ ok }` |
-| `media_seek` | `position_ms` (≥0), `player?` | `{ position_ms }` — tries `SetPosition(trackId, pos)` then `Seek(offset)` fallback, guards `NoTrack` |
+| `media_seek` | `position_ms` (≥0), `player?` | `{ position_ms }` — tries `SetPosition(trackId, pos)` then `Seek(offset)` fallback, guards `NoTrack` and `CanSeek` |
+| `media_seek_relative` | `offset_ms` (signed int), `player?` | `{ position_ms }` — seeks relative to the current position; result clamps at 0 |
 | `media_volume` | `level` (0.0–1.0 or 0–100), `player?` | `{ volume }` — int `1` = 1%, float `1.0` = 100% |
 | `media_status` | `player?` | `{ player, status, metadata, volume, position_ms, rate, shuffle, loop_status }` — `position_ms` extrapolates via `Rate` when `Position==0` while `Playing`, `metadata` merges from cache on sparse updates |
 | `media_list_players` | — | `{ players: [..] }` |

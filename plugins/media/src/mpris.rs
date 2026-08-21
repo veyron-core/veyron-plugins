@@ -6,11 +6,12 @@
 //! testable: the D-Bus is accessed only through `MprisBackend` so tests use
 //! `MockBackend`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use serde::Serialize;
 use zbus::Connection;
 use zbus::fdo::{DBusProxy, PropertiesProxy};
@@ -21,6 +22,10 @@ const MPRIS_PREFIX: &str = "org.mpris.MediaPlayer2.";
 const MPRIS_PATH: &str = "/org/mpris/MediaPlayer2";
 const PLAYER_IFACE: &str = "org.mpris.MediaPlayer2.Player";
 const NO_TRACK: &str = "/TrackList/NoTrack";
+
+/// MPRIS players need not emit periodic Position updates; past this age an
+/// extrapolated estimate is no longer trusted (BUG-2 window cap).
+const EXTRAPOLATION_MAX_AGE_MS: u128 = 120_000;
 
 // ---------------------------------------------------------------------------
 // Backend trait
@@ -47,6 +52,7 @@ pub trait MprisBackend: Send + Sync {
     async fn set_shuffle(&self, player: &str, enabled: bool) -> Result<(), String>;
     async fn get_loop_status(&self, player: &str) -> Result<String, String>;
     async fn set_loop_status(&self, player: &str, status: &str) -> Result<(), String>;
+    async fn get_capability(&self, player: &str, prop: &str) -> Result<bool, String>;
 }
 
 // ---------------------------------------------------------------------------
@@ -89,7 +95,7 @@ impl MprisBackend for RealBackend {
                 &(uri,),
             )
             .await
-            .map_err(|e| format!("ERR_MEDIA_PLAYER_VANISHED: player '{player}' {method} failed: {e}"))?;
+            .map_err(|e| wrap_control_err(player, method, &e.to_string()))?;
         } else {
             conn.call_method(
                 Some(player),
@@ -99,7 +105,7 @@ impl MprisBackend for RealBackend {
                 &(),
             )
             .await
-            .map_err(|e| format!("ERR_MEDIA_PLAYER_VANISHED: player '{player}' {method} failed: {e}"))?;
+            .map_err(|e| wrap_control_err(player, method, &e.to_string()))?;
         }
         Ok(())
     }
@@ -204,7 +210,7 @@ impl MprisBackend for RealBackend {
         props
             .set(iface, "Volume", &val)
             .await
-            .map_err(|e| format!("ERR_MEDIA_PLAYER_VANISHED: player '{player}' set Volume failed: {e}"))?;
+            .map_err(|e| wrap_control_err(player, "set Volume", &e.to_string()))?;
         Ok(())
     }
 
@@ -306,7 +312,7 @@ impl MprisBackend for RealBackend {
         props
             .set(iface, "Shuffle", &val)
             .await
-            .map_err(|e| format!("ERR_MEDIA_PLAYER_VANISHED: player '{player}' set Shuffle failed: {e}"))?;
+            .map_err(|e| wrap_control_err(player, "set Shuffle", &e.to_string()))?;
         Ok(())
     }
 
@@ -353,9 +359,211 @@ impl MprisBackend for RealBackend {
         props
             .set(iface, "LoopStatus", &val)
             .await
-            .map_err(|e| format!("ERR_MEDIA_PLAYER_VANISHED: player '{player}' set LoopStatus failed: {e}"))?;
+            .map_err(|e| wrap_control_err(player, "set LoopStatus", &e.to_string()))?;
         Ok(())
     }
+
+    async fn get_capability(&self, player: &str, prop: &str) -> Result<bool, String> {
+        let conn = Connection::session()
+            .await
+            .map_err(|e| format!("ERR_MEDIA_BUS_UNAVAILABLE: {e}"))?;
+        let iface = InterfaceName::try_from(PLAYER_IFACE).unwrap();
+        let props = PropertiesProxy::builder(&conn)
+            .destination(player)
+            .map_err(|e| wrap_control_err(player, &format!("get {prop}"), &e.to_string()))?
+            .path(MPRIS_PATH)
+            .map_err(|e| wrap_control_err(player, &format!("get {prop}"), &e.to_string()))?
+            .build()
+            .await
+            .map_err(|e| wrap_control_err(player, &format!("get {prop}"), &e.to_string()))?;
+        let v: OwnedValue = props
+            .get(iface, prop)
+            .await
+            .map_err(|e| wrap_control_err(player, &format!("get {prop}"), &e.to_string()))?;
+        bool::try_from(v).map_err(|e| format!("ERR_MEDIA_BAD_PARAMS: player '{player}' bad {prop} type: {e}"))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Signal watcher — PropertiesChanged / Seeked feed POS_CACHE (BUG-2 full fix)
+// ---------------------------------------------------------------------------
+
+static WATCHED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn watched() -> &'static Mutex<HashSet<String>> {
+    WATCHED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Spawn the supervisor that keeps one signal-watcher task per MPRIS player.
+/// Called from `on_init`; detached — it only ever writes to `POS_CACHE`, so
+/// the single-reader rule on `VeyronClient` is untouched.
+pub fn spawn_watch_task() {
+    tokio::spawn(async move {
+        let mut scan = tokio::time::interval(std::time::Duration::from_secs(5));
+        scan.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            scan.tick().await;
+            let Ok(players) = list_players().await else { continue };
+            let mut new_watchers = Vec::new();
+            {
+                let mut set = watched().lock().unwrap();
+                for p in players {
+                    if set.insert(p.clone()) {
+                        new_watchers.push(p);
+                    }
+                }
+            }
+            for p in new_watchers {
+                tokio::spawn(watch_player(p));
+            }
+        }
+    });
+}
+
+async fn watch_player(name: String) {
+    // Any error ends this watcher; the next scan re-watches if the name is
+    // listed again.
+    let _ = run_watch(&name).await;
+    watched().lock().unwrap().remove(&name);
+}
+
+async fn run_watch(name: &str) -> Result<(), String> {
+    let conn = Connection::session().await.map_err(|e| format!("ERR_MEDIA_BUS_UNAVAILABLE: {e}"))?;
+
+    let props = PropertiesProxy::builder(&conn)
+        .destination(name.to_string())
+        .map_err(|e| format!("ERR_MEDIA_PLAYER_VANISHED: watch '{name}': {e}"))?
+        .path(MPRIS_PATH)
+        .map_err(|e| format!("ERR_MEDIA_PLAYER_VANISHED: watch '{name}': {e}"))?
+        .build()
+        .await
+        .map_err(|e| format!("ERR_MEDIA_PLAYER_VANISHED: watch '{name}': {e}"))?;
+    let mut changed = props
+        .receive_properties_changed()
+        .await
+        .map_err(|e| format!("ERR_MEDIA_PLAYER_VANISHED: watch '{name}': {e}"))?;
+
+    let proxy = zbus::Proxy::new(&conn, name.to_string(), MPRIS_PATH, PLAYER_IFACE)
+        .await
+        .map_err(|e| format!("ERR_MEDIA_PLAYER_VANISHED: watch '{name}': {e}"))?;
+    let mut seeked = proxy
+        .receive_signal("Seeked")
+        .await
+        .map_err(|e| format!("ERR_MEDIA_PLAYER_VANISHED: watch '{name}': {e}"))?;
+
+    loop {
+        tokio::select! {
+            item = changed.next() => {
+                match item {
+                    Some(sig) => handle_properties_changed(name, &sig),
+                    None => return Ok(()),
+                }
+            }
+            item = seeked.next() => {
+                match item {
+                    Some(msg) => {
+                        if let Ok(pos_us) = msg.body().deserialize::<i64>() {
+                            cache_note(name, Some(pos_us), None);
+                        }
+                    }
+                    None => return Ok(()),
+                }
+            }
+        }
+    }
+}
+
+fn handle_properties_changed(player: &str, sig: &zbus::fdo::PropertiesChanged) {
+    let Ok(args) = sig.args() else { return };
+    if args.interface_name.as_str() != PLAYER_IFACE {
+        return;
+    }
+    for (key, value) in args.changed_properties.iter() {
+        match &**key {
+            "Position" => {
+                if let Ok(pos) = i64::try_from(value) {
+                    cache_note(player, Some(pos), None);
+                }
+            }
+            "Rate" => {
+                if let Ok(rate) = f64::try_from(value) {
+                    cache_note(player, None, Some(rate));
+                }
+            }
+            "PlaybackStatus" => {
+                if let Value::Str(s) = value {
+                    if s.as_str() != "Playing" {
+                        cache_note(player, None, Some(0.0));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn cache_note(player: &str, pos: Option<i64>, rate: Option<f64>) {
+    let mut cache = pos_cache().lock().unwrap();
+    let entry = cache
+        .entry(player.to_string())
+        .or_insert((0, 1.0, Instant::now()));
+    if let Some(p) = pos {
+        entry.0 = p;
+    }
+    if let Some(r) = rate {
+        entry.1 = r;
+    }
+    entry.2 = Instant::now();
+}
+
+// ---------------------------------------------------------------------------
+// Helpers — error taxonomy + capability guards
+// ---------------------------------------------------------------------------
+
+/// Classify a raw D-Bus error message: `Some("VANISHED")` when the player
+/// name is gone from the bus, `Some("NOT_SUPPORTED")` when the player is
+/// alive but rejects the property/method. Anything else falls back per-call.
+pub(crate) fn classify_dbus(msg: &str) -> Option<&'static str> {
+    if msg.contains("ServiceUnknown")
+        || msg.contains("NameHasNoOwner")
+        || msg.contains("Disconnected")
+    {
+        Some("VANISHED")
+    } else if msg.contains("No such property")
+        || msg.contains("UnknownProperty")
+        || msg.contains("UnknownMethod")
+        || msg.contains("NotSupported")
+    {
+        Some("NOT_SUPPORTED")
+    } else {
+        None
+    }
+}
+
+fn wrap_control_err(player: &str, op: &str, e: &str) -> String {
+    match classify_dbus(e) {
+        Some("NOT_SUPPORTED") => {
+            format!("ERR_MEDIA_NOT_SUPPORTED: player '{player}' {op} failed: {e}")
+        }
+        _ => format!("ERR_MEDIA_PLAYER_VANISHED: player '{player}' {op} failed: {e}"),
+    }
+}
+
+/// Capability probes are best-effort: only an explicit `false` blocks the
+/// action; a missing/unreadable property must not break minimal players
+/// (the actual failure then surfaces with its own taxonomy).
+async fn require_capability<B: MprisBackend>(
+    backend: &B,
+    player: &str,
+    prop: &str,
+    op: &str,
+) -> Result<(), String> {
+    if matches!(backend.get_capability(player, prop).await, Ok(false)) {
+        return Err(format!(
+            "ERR_MEDIA_NOT_SUPPORTED: player '{player}' does not allow {op} ({prop}=false)"
+        ));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -447,6 +655,7 @@ async fn play_with<B: MprisBackend>(
 ) -> Result<serde_json::Value, String> {
     let available = list_players_with(backend).await?;
     let target = resolve_player(player, &available)?;
+    require_capability(backend, &target, "CanPlay", "play").await?;
     if let Some(u) = uri {
         backend.call_player_method(&target, "OpenUri", Some(u)).await?;
     }
@@ -460,6 +669,7 @@ pub async fn pause(player: Option<&str>) -> Result<serde_json::Value, String> {
 async fn pause_with<B: MprisBackend>(backend: &B, player: Option<&str>) -> Result<serde_json::Value, String> {
     let available = list_players_with(backend).await?;
     let target = resolve_player(player, &available)?;
+    require_capability(backend, &target, "CanPause", "pause").await?;
     backend.call_player_method(&target, "Pause", None).await?;
     Ok(serde_json::json!({"ok": true}))
 }
@@ -470,6 +680,7 @@ pub async fn play_pause(player: Option<&str>) -> Result<serde_json::Value, Strin
 async fn play_pause_with<B: MprisBackend>(backend: &B, player: Option<&str>) -> Result<serde_json::Value, String> {
     let available = list_players_with(backend).await?;
     let target = resolve_player(player, &available)?;
+    require_capability(backend, &target, "CanPause", "play_pause").await?;
     backend.call_player_method(&target, "PlayPause", None).await?;
     // BUG-3 fix: PlaybackStatus updates async via PropertiesChanged, so retry
     // briefly instead of reading stale value immediately.
@@ -500,6 +711,7 @@ pub async fn next(player: Option<&str>) -> Result<serde_json::Value, String> {
 async fn next_with<B: MprisBackend>(backend: &B, player: Option<&str>) -> Result<serde_json::Value, String> {
     let available = list_players_with(backend).await?;
     let target = resolve_player(player, &available)?;
+    require_capability(backend, &target, "CanGoNext", "next").await?;
     backend.call_player_method(&target, "Next", None).await?;
     Ok(serde_json::json!({"ok": true}))
 }
@@ -510,6 +722,7 @@ pub async fn prev(player: Option<&str>) -> Result<serde_json::Value, String> {
 async fn prev_with<B: MprisBackend>(backend: &B, player: Option<&str>) -> Result<serde_json::Value, String> {
     let available = list_players_with(backend).await?;
     let target = resolve_player(player, &available)?;
+    require_capability(backend, &target, "CanGoPrevious", "prev").await?;
     backend.call_player_method(&target, "Previous", None).await?;
     Ok(serde_json::json!({"ok": true}))
 }
@@ -532,15 +745,61 @@ async fn seek_with<B: MprisBackend>(
     player: Option<&str>,
     position_ms: u64,
 ) -> Result<serde_json::Value, String> {
-    let available = list_players_with(backend).await?;
-    let target = resolve_player(player, &available)?;
     let target_us = (position_ms as i64)
         .checked_mul(1000)
         .ok_or_else(|| "ERR_MEDIA_BAD_PARAMS: position_ms overflow".to_string())?;
+    let reached_us = seek_absolute_to(backend, player, target_us).await?;
+    Ok(serde_json::json!({"position_ms": reached_us / 1000}))
+}
+
+pub async fn seek_relative(player: Option<&str>, offset_ms: i64) -> Result<serde_json::Value, String> {
+    seek_relative_with(&RealBackend, player, offset_ms).await
+}
+async fn seek_relative_with<B: MprisBackend>(
+    backend: &B,
+    player: Option<&str>,
+    offset_ms: i64,
+) -> Result<serde_json::Value, String> {
+    let available = list_players_with(backend).await?;
+    let target = resolve_player(player, &available)?;
+    let current = backend
+        .get_position(&target)
+        .await
+        .map_err(|e| format!("ERR_MEDIA_PLAYER_VANISHED: get Position failed: {e}"))?;
+    let delta = offset_ms
+        .checked_mul(1000)
+        .ok_or_else(|| "ERR_MEDIA_BAD_PARAMS: offset_ms overflow".to_string())?;
+    let target_us = current
+        .checked_add(delta)
+        .ok_or_else(|| "ERR_MEDIA_BAD_PARAMS: seek target overflow".to_string())?
+        .max(0);
+    let reached_us = seek_absolute_on(backend, &target, target_us).await?;
+    Ok(serde_json::json!({"position_ms": reached_us / 1000}))
+}
+
+async fn seek_absolute_to<B: MprisBackend>(
+    backend: &B,
+    player: Option<&str>,
+    target_us: i64,
+) -> Result<i64, String> {
+    let available = list_players_with(backend).await?;
+    let target = resolve_player(player, &available)?;
+    seek_absolute_on(backend, &target, target_us).await
+}
+
+/// Shared absolute-seek core: CanSeek guard, then `SetPosition` primary with
+/// `Seek(offset)` fallback. Returns the requested target in micros (players
+/// may land near it; exactness is not guaranteed by MPRIS).
+async fn seek_absolute_on<B: MprisBackend>(
+    backend: &B,
+    target: &str,
+    target_us: i64,
+) -> Result<i64, String> {
+    require_capability(backend, target, "CanSeek", "seek").await?;
 
     // Fetch trackId — required for SetPosition. If metadata unavailable,
     // fall back to Seek directly.
-    let track_id_opt = match backend.get_metadata(&target).await {
+    let track_id_opt = match backend.get_metadata(target).await {
         Ok(raw) => parse_metadata(&raw).track_id,
         Err(_) => None,
     };
@@ -549,25 +808,24 @@ async fn seek_with<B: MprisBackend>(
         if track_id == NO_TRACK {
             return Err("ERR_MEDIA_NO_TRACK: no track loaded, cannot seek".to_string());
         }
-        match backend.set_position(&target, &track_id, target_us).await {
-            Ok(()) => return Ok(serde_json::json!({"position_ms": position_ms})),
+        match backend.set_position(target, &track_id, target_us).await {
+            Ok(()) => return Ok(target_us),
             Err(e) if e.contains("ERR_MEDIA_NOT_SUPPORTED") || e.contains("UnknownMethod") || e.contains("NotSupported") => {
                 // Fall through to Seek fallback
             }
-            Err(e) if e.contains("ERR_MEDIA_BAD_PARAMS") => return Err(e),
             Err(e) => return Err(e),
         }
     }
 
     let current = backend
-        .get_position(&target)
+        .get_position(target)
         .await
         .map_err(|e| format!("ERR_MEDIA_PLAYER_VANISHED: get Position failed: {e}"))?;
     let offset = target_us
         .checked_sub(current)
         .ok_or_else(|| "ERR_MEDIA_BAD_PARAMS: seek offset overflow".to_string())?;
-    backend.seek_offset(&target, offset).await?;
-    Ok(serde_json::json!({"position_ms": position_ms}))
+    backend.seek_offset(target, offset).await?;
+    Ok(target_us)
 }
 
 pub async fn set_volume(player: Option<&str>, level: f64) -> Result<serde_json::Value, String> {
@@ -580,6 +838,7 @@ async fn set_volume_with<B: MprisBackend>(
 ) -> Result<serde_json::Value, String> {
     let available = list_players_with(backend).await?;
     let target = resolve_player(player, &available)?;
+    require_capability(backend, &target, "CanControl", "set volume").await?;
     let clamped = level.clamp(0.0, 1.0);
     backend.set_volume(&target, clamped).await?;
     Ok(serde_json::json!({"volume": clamped}))
@@ -644,20 +903,18 @@ async fn status_with<B: MprisBackend>(
 fn extrapolate_position(player: &str, raw_pos: i64, rate: f64, playback: &str) -> i64 {
     let now = Instant::now();
     let mut cache = pos_cache().lock().unwrap();
-    let result = if playback == "Playing" && rate != 0.0 {
-        if raw_pos == 0 {
-            if let Some((prev_pos, prev_rate, prev_time)) = cache.get(player) {
-                if *prev_pos > 0 {
-                    let elapsed_us = now.duration_since(*prev_time).as_micros() as i64;
-                    let estimated = *prev_pos + (elapsed_us as f64 * prev_rate) as i64;
-                    if estimated > 0 {
-                        estimated
-                    } else {
-                        raw_pos
-                    }
-                } else {
-                    raw_pos
-                }
+    let trusted = match cache.get(player) {
+        Some(&(pos, rate, at)) if pos > 0 && now.duration_since(at).as_millis() <= EXTRAPOLATION_MAX_AGE_MS => {
+            Some((pos, rate, at))
+        }
+        _ => None,
+    };
+    let result = if playback == "Playing" && rate != 0.0 && raw_pos == 0 {
+        if let Some((prev_pos, prev_rate, prev_time)) = trusted {
+            let elapsed_us = now.duration_since(prev_time).as_micros() as f64;
+            let estimated = prev_pos as f64 + elapsed_us * prev_rate;
+            if estimated > 0.0 {
+                estimated as i64
             } else {
                 raw_pos
             }
@@ -682,6 +939,7 @@ pub async fn set_shuffle(player: Option<&str>, enabled: bool) -> Result<serde_js
 async fn set_shuffle_with<B: MprisBackend>(backend: &B, player: Option<&str>, enabled: bool) -> Result<serde_json::Value, String> {
     let available = list_players_with(backend).await?;
     let target = resolve_player(player, &available)?;
+    require_capability(backend, &target, "CanControl", "set shuffle").await?;
     backend.set_shuffle(&target, enabled).await?;
     Ok(serde_json::json!({"shuffle": enabled}))
 }
@@ -692,6 +950,7 @@ pub async fn set_loop(player: Option<&str>, mode: &str) -> Result<serde_json::Va
 async fn set_loop_with<B: MprisBackend>(backend: &B, player: Option<&str>, mode: &str) -> Result<serde_json::Value, String> {
     let available = list_players_with(backend).await?;
     let target = resolve_player(player, &available)?;
+    require_capability(backend, &target, "CanControl", "set loop").await?;
     backend.set_loop_status(&target, mode).await?;
     let normalized = backend.get_loop_status(&target).await.unwrap_or_else(|_| {
         match mode.to_lowercase().as_str() {
@@ -757,13 +1016,7 @@ fn meta_string_array(metadata: &HashMap<String, OwnedValue>, key: &str) -> Vec<S
         return Vec::new();
     };
     match Value::try_from(v).ok() {
-        Some(Value::Array(arr)) => arr
-            .iter()
-            .filter_map(|e| match e {
-                Value::Str(s) => Some(s.to_string()),
-                _ => String::try_from(e).ok(),
-            })
-            .collect(),
+        Some(Value::Array(arr)) => arr.iter().filter_map(|e| e.downcast_ref::<String>().ok()).collect(),
         Some(Value::Str(s)) => vec![s.to_string()],
         _ => Vec::new(),
     }
@@ -771,16 +1024,17 @@ fn meta_string_array(metadata: &HashMap<String, OwnedValue>, key: &str) -> Vec<S
 
 fn parse_length_value(v: OwnedValue) -> Option<i64> {
     let val = Value::try_from(v).ok()?;
-    match val {
-        Value::I64(n) => Some(n),
-        Value::U64(n) => Some(n as i64),
-        Value::I32(n) => Some(n as i64),
-        Value::U32(n) => Some(n as i64),
-        Value::I16(n) => Some(n as i64),
-        Value::U16(n) => Some(n as i64),
-        Value::U8(n) => Some(n as i64),
-        _ => None,
-    }
+    let n = match val {
+        Value::I64(n) => n,
+        Value::U64(n) => n as i64,
+        Value::I32(n) => n as i64,
+        Value::U32(n) => n as i64,
+        Value::I16(n) => n as i64,
+        Value::U16(n) => n as i64,
+        Value::U8(n) => n as i64,
+        _ => return None,
+    };
+    (n >= 0).then_some(n)
 }
 
 pub fn parse_metadata(metadata: &HashMap<String, OwnedValue>) -> MediaMetadata {
@@ -900,6 +1154,7 @@ mod tests {
         rate: f64,
         shuffle: bool,
         loop_status: String,
+        caps: HashMap<String, bool>,
     }
     #[async_trait]
     impl MprisBackend for MockBackend {
@@ -931,6 +1186,9 @@ mod tests {
         async fn set_shuffle(&self, _player: &str, _v: bool) -> Result<(), String> { Ok(()) }
         async fn get_loop_status(&self, _player: &str) -> Result<String, String> { Ok(self.loop_status.clone()) }
         async fn set_loop_status(&self, _player: &str, _s: &str) -> Result<(), String> { Ok(()) }
+        async fn get_capability(&self, _player: &str, prop: &str) -> Result<bool, String> {
+            Ok(*self.caps.get(prop).unwrap_or(&true))
+        }
     }
 
     fn mock(names: Vec<&str>, position: i64, status: &str, track_id: Option<&str>) -> MockBackend {
@@ -943,6 +1201,7 @@ mod tests {
             rate: 1.0,
             shuffle: false,
             loop_status: "None".into(),
+            caps: HashMap::new(),
         }
     }
 
@@ -1003,5 +1262,239 @@ mod tests {
         let merged = merge_metadata_cached(player, m2);
         assert_eq!(merged.length_micros, Some(210_000_000));
         assert_eq!(merged.track_id.as_deref(), Some("/Track/1"));
+    }
+
+    // ---- v0.0.3: negative metadata parsing ----
+
+    #[test]
+    fn parse_artist_empty_array() {
+        let mut m = HashMap::new();
+        m.insert("xesam:artist".into(), arr_str(&[]));
+        let p = parse_metadata(&m);
+        assert!(p.artists.is_empty());
+    }
+
+    #[test]
+    fn parse_artist_mixed_array_skips_non_strings() {
+        let mixed: Vec<Value> = vec![Value::from("Keep"), Value::from(42_u32)];
+        let mut m = HashMap::new();
+        m.insert(
+            "xesam:artist".into(),
+            OwnedValue::try_from(Value::new(mixed)).unwrap(),
+        );
+        let p = parse_metadata(&m);
+        assert_eq!(p.artists, vec!["Keep"]);
+    }
+
+    #[test]
+    fn parse_artist_wrong_type_yields_empty() {
+        let mut m = HashMap::new();
+        m.insert("xesam:artist".into(), i64v(7));
+        let p = parse_metadata(&m);
+        assert!(p.artists.is_empty());
+    }
+
+    #[test]
+    fn parse_title_wrong_type_is_none() {
+        let mut m = HashMap::new();
+        m.insert("xesam:title".into(), arr_str(&["not", "a", "title"]));
+        let p = parse_metadata(&m);
+        assert!(p.title.is_none());
+    }
+
+    #[test]
+    fn parse_length_small_int_variants() {
+        for (name, v) in [
+            ("i32", OwnedValue::try_from(Value::new(1_234_i32)).unwrap()),
+            ("i16", OwnedValue::try_from(Value::new(567_i16)).unwrap()),
+            ("u16", OwnedValue::try_from(Value::new(89_u16)).unwrap()),
+            ("u8", OwnedValue::try_from(Value::new(12_u8)).unwrap()),
+        ] {
+            let mut m = HashMap::new();
+            m.insert("mpris:length".into(), v);
+            let p = parse_metadata(&m);
+            assert_eq!(
+                p.length_micros,
+                Some(match name { "i32" => 1234, "i16" => 567, "u16" => 89, _ => 12 }),
+                "variant {name} failed"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_length_float_rejected() {
+        let mut m = HashMap::new();
+        m.insert("mpris:length".into(), OwnedValue::try_from(Value::new(1.5_f64)).unwrap());
+        let p = parse_metadata(&m);
+        assert!(p.length_micros.is_none());
+    }
+
+    #[test]
+    fn parse_length_negative_rejected() {
+        let mut m = HashMap::new();
+        m.insert("mpris:length".into(), i64v(-42));
+        let p = parse_metadata(&m);
+        assert!(p.length_micros.is_none());
+    }
+
+    // ---- v0.0.3: capability guards ----
+
+    #[tokio::test]
+    async fn guard_seek_denied_when_can_seek_false() {
+        let mut b = mock(vec!["org.mpris.MediaPlayer2.spotify"], 0, "Playing", Some("/org/mpris/MediaPlayer2/Track/1"));
+        b.caps.insert("CanSeek".into(), false);
+        let err = seek_with(&b, None, 5000).await.unwrap_err();
+        assert!(err.contains("ERR_MEDIA_NOT_SUPPORTED"), "{err}");
+        assert!(err.contains("CanSeek"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn guard_pause_denied_when_can_pause_false() {
+        let mut b = mock(vec!["org.mpris.MediaPlayer2.spotify"], 0, "Playing", None);
+        b.caps.insert("CanPause".into(), false);
+        let err = pause_with(&b, None).await.unwrap_err();
+        assert!(err.contains("ERR_MEDIA_NOT_SUPPORTED"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn guard_play_pause_denied_when_can_pause_false() {
+        let mut b = mock(vec!["org.mpris.MediaPlayer2.spotify"], 0, "Paused", None);
+        b.caps.insert("CanPause".into(), false);
+        let err = play_pause_with(&b, None).await.unwrap_err();
+        assert!(err.contains("ERR_MEDIA_NOT_SUPPORTED"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn guard_next_denied_when_can_go_next_false() {
+        let mut b = mock(vec!["org.mpris.MediaPlayer2.spotify"], 0, "Playing", None);
+        b.caps.insert("CanGoNext".into(), false);
+        let err = next_with(&b, None).await.unwrap_err();
+        assert!(err.contains("ERR_MEDIA_NOT_SUPPORTED"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn guard_prev_denied_when_can_go_previous_false() {
+        let mut b = mock(vec!["org.mpris.MediaPlayer2.spotify"], 0, "Playing", None);
+        b.caps.insert("CanGoPrevious".into(), false);
+        let err = prev_with(&b, None).await.unwrap_err();
+        assert!(err.contains("ERR_MEDIA_NOT_SUPPORTED"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn guard_play_denied_when_can_play_false() {
+        let mut b = mock(vec!["org.mpris.MediaPlayer2.spotify"], 0, "Paused", None);
+        b.caps.insert("CanPlay".into(), false);
+        let err = play_with(&b, None, None).await.unwrap_err();
+        assert!(err.contains("ERR_MEDIA_NOT_SUPPORTED"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn guard_volume_denied_when_can_control_false() {
+        let mut b = mock(vec!["org.mpris.MediaPlayer2.spotify"], 0, "Playing", None);
+        b.caps.insert("CanControl".into(), false);
+        let err = set_volume_with(&b, None, 0.5).await.unwrap_err();
+        assert!(err.contains("ERR_MEDIA_NOT_SUPPORTED"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn guard_shuffle_denied_when_can_control_false() {
+        let mut b = mock(vec!["org.mpris.MediaPlayer2.spotify"], 0, "Playing", None);
+        b.caps.insert("CanControl".into(), false);
+        let err = set_shuffle_with(&b, None, true).await.unwrap_err();
+        assert!(err.contains("ERR_MEDIA_NOT_SUPPORTED"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn guard_loop_denied_when_can_control_false() {
+        let mut b = mock(vec!["org.mpris.MediaPlayer2.spotify"], 0, "Playing", None);
+        b.caps.insert("CanControl".into(), false);
+        let err = set_loop_with(&b, None, "track").await.unwrap_err();
+        assert!(err.contains("ERR_MEDIA_NOT_SUPPORTED"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn guard_missing_capability_does_not_block() {
+        let b = mock(vec!["org.mpris.MediaPlayer2.spotify"], 0, "Paused", None);
+        play_with(&b, None, None).await.expect("missing property must not block");
+    }
+
+    // ---- v0.0.3: seek_relative ----
+
+    #[tokio::test]
+    async fn seek_relative_forward() {
+        let b = mock(vec!["org.mpris.MediaPlayer2.mpd"], 6_000_000, "Playing", Some("/org/mpd/Tracks/3"));
+        let res = seek_relative_with(&b, None, 25_000).await.unwrap();
+        assert_eq!(res["position_ms"], 31_000);
+    }
+
+    #[tokio::test]
+    async fn seek_relative_backward() {
+        let b = mock(vec!["org.mpris.MediaPlayer2.mpd"], 30_000_000, "Playing", Some("/org/mpd/Tracks/3"));
+        let res = seek_relative_with(&b, None, -15_000).await.unwrap();
+        assert_eq!(res["position_ms"], 15_000);
+    }
+
+    #[tokio::test]
+    async fn seek_relative_clamps_at_zero() {
+        let b = mock(vec!["org.mpris.MediaPlayer2.mpd"], 1_000_000, "Playing", Some("/org/mpd/Tracks/3"));
+        let res = seek_relative_with(&b, None, -5_000).await.unwrap();
+        assert_eq!(res["position_ms"], 0);
+    }
+
+    // ---- v0.0.3: error classification ----
+
+    #[test]
+    fn classify_no_such_property_is_not_supported() {
+        assert_eq!(classify_dbus("No such property 'Shuffle'"), Some("NOT_SUPPORTED"));
+    }
+
+    #[test]
+    fn classify_service_unknown_is_vanished() {
+        assert_eq!(classify_dbus("ServiceUnknown: The name was not provided"), Some("VANISHED"));
+    }
+
+    #[test]
+    fn classify_unrecognized_message_is_none() {
+        assert_eq!(classify_dbus("some other dbus failure"), None);
+    }
+
+    #[test]
+    fn wrap_control_err_maps_property_error_to_not_supported() {
+        let wrapped = wrap_control_err("p", "set Shuffle", "No such property");
+        assert!(wrapped.starts_with("ERR_MEDIA_NOT_SUPPORTED"), "{wrapped}");
+    }
+
+    #[test]
+    fn wrap_control_err_defaults_to_vanished() {
+        let wrapped = wrap_control_err("p", "Pause", "weird failure");
+        assert!(wrapped.starts_with("ERR_MEDIA_PLAYER_VANISHED"), "{wrapped}");
+    }
+
+    // ---- v0.0.3: signal-fed cache + extrapolation window ----
+
+    #[test]
+    fn cache_note_updates_position_and_rate_independently() {
+        cache_note("cn_test_player", Some(5_000_000), None);
+        cache_note("cn_test_player", None, Some(2.0));
+        let entry = pos_cache().lock().unwrap().get("cn_test_player").copied().unwrap();
+        assert_eq!(entry.0, 5_000_000);
+        assert_eq!(entry.1, 2.0);
+    }
+
+    #[test]
+    fn extrapolate_uses_signal_fed_sample() {
+        let key = "ext_test_fresh";
+        pos_cache().lock().unwrap().insert(key.to_string(), (10_000_000, 1.0, Instant::now()));
+        let estimated = extrapolate_position(key, 0, 1.0, "Playing");
+        assert!(estimated >= 10_000_000, "estimated {estimated}");
+    }
+
+    #[test]
+    fn extrapolate_stale_sample_not_trusted() {
+        let key = "ext_test_stale";
+        let stale = Instant::now() - std::time::Duration::from_secs(600);
+        pos_cache().lock().unwrap().insert(key.to_string(), (10_000_000, 1.0, stale));
+        let result = extrapolate_position(key, 0, 1.0, "Playing");
+        assert_eq!(result, 0);
     }
 }

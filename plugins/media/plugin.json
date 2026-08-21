@@ -1,6 +1,6 @@
 {
   "plugin_id": "media",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "permissions": [],
   "kernel_compatibility_range": {
     "min": "0.1.0",
@@ -135,6 +135,26 @@
         "type": "object",
         "properties": {
           "position_ms": { "type": "integer", "description": "Resulting position in milliseconds." }
+        },
+        "required": ["position_ms"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "media_seek_relative",
+      "input": {
+        "type": "object",
+        "properties": {
+          "offset_ms": { "type": "integer", "description": "Signed offset in milliseconds from the current position (negative seeks backward; result clamps at 0)." },
+          "player": { "type": "string", "description": "MPRIS player name; omit for the default player." }
+        },
+        "required": ["offset_ms"],
+        "additionalProperties": true
+      },
+      "output": {
+        "type": "object",
+        "properties": {
+          "position_ms": { "type": "integer", "description": "Requested target position in milliseconds after applying the offset." }
         },
         "required": ["position_ms"],
         "additionalProperties": false

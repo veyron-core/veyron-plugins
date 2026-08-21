@@ -15,7 +15,7 @@ use veyron_sdk::proto::{
 use veyron_sdk::{Plugin, VeyronClient, VeyronError};
 
 const PLUGIN_ID: &str = "media";
-const PLUGIN_VERSION: &str = "0.0.2";
+const PLUGIN_VERSION: &str = "0.0.3";
 
 struct MediaPlugin;
 
@@ -38,6 +38,7 @@ impl Plugin for MediaPlugin {
                 "media_prev".to_string(),
                 "media_stop".to_string(),
                 "media_seek".to_string(),
+                "media_seek_relative".to_string(),
                 "media_volume".to_string(),
                 "media_status".to_string(),
                 "media_list_players".to_string(),
@@ -49,6 +50,7 @@ impl Plugin for MediaPlugin {
     }
 
     async fn on_init(&mut self, _client: &mut VeyronClient) -> Result<(), VeyronError> {
+        mpris::spawn_watch_task();
         Ok(())
     }
 
@@ -137,6 +139,10 @@ async fn handle_action_request(req: ActionRequest) -> ActionResponse {
         "media_seek" => match params.get("position_ms").and_then(Value::as_u64) {
             Some(position_ms) => mpris::seek(player.as_deref(), position_ms).await,
             None => Err("ERR_MEDIA_BAD_PARAMS: missing or invalid `position_ms`".to_string()),
+        },
+        "media_seek_relative" => match params.get("offset_ms").and_then(Value::as_i64) {
+            Some(offset_ms) => mpris::seek_relative(player.as_deref(), offset_ms).await,
+            None => Err("ERR_MEDIA_BAD_PARAMS: missing or invalid `offset_ms` (integer, ms; may be negative)".to_string()),
         },
         "media_volume" => match parse_volume(&params) {
             Some(level) => mpris::set_volume(player.as_deref(), level).await,

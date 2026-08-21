@@ -31,15 +31,22 @@ Fixes from `BUGS.md` verified on `firefox.instance_1_424` + `mpd` + `TelegramDes
 
 Remaining gaps → see `BUGS.md` (`BUG-1 Firefox seek still high`, `BUG-2 stale Position full fix needs PropertiesChanged stream`).
 
-## v1.1 — polish (no kernel change, next)
+## v0.0.3 — shipped (v1.1 polish, 13 actions) — 2026-08-21
 
-- `PropertiesChanged` listener (zbus `Stream` for `org.freedesktop.DBus.Properties.PropertiesChanged` on `Player`), publish `media.state_changed` when declared `PERMISSION_EVENT_PUBLISH` (opt-in). Needed for true BUG-2 fix (subscribe, cache `(pos,rate,updated_at)` and `Seeked(int64)` signal).
-- Handle `CanSeek/CanControl/CanPause/CanGoNext/CanGoPrevious` guards before calling — return `ERR_MEDIA_NOT_SUPPORTED` instead of forwarding raw D-Bus error.
-- Cover `media_*` with negative tests: empty `x:artist`, `x:artist` single string vs array, `mpris:length` variants.
-- `media_shuffle`/`media_loop` already landed in 0.2.0; add `media_seek_relative {offset_ms}` convenience.
+- **Capability guards**: `CanPlay`/`CanPause`/`CanPlayPause`/`CanGoNext`/`CanGoPrevious`/`CanSeek`/`CanControl` checked before the call — explicit `false` → `ERR_MEDIA_NOT_SUPPORTED`; missing property never blocks (minimal players keep working).
+- **Error reclassification**: `classify_dbus` — `No such property` etc. now `ERR_MEDIA_NOT_SUPPORTED`, no longer misreported as `PLAYER_VANISHED` (the firefox Shuffle case).
+- **Signal watcher (full BUG-2 fix for compliant players)**: per-player background task subscribes `PropertiesChanged` + `Seeked(int64)` and feeds `POS_CACHE` `(pos, rate, updated_at)`; `extrapolate_position` trusts samples only within a 120s window (MPRIS needs no periodic Position updates). Watcher writes static caches only — single-reader rule on `VeyronClient` untouched.
+- **`media_seek_relative {offset_ms}`** — signed offset, clamps at 0, shares the absolute-seek core (`seek_absolute_on`) with `media_seek`.
+- **Negative tests**: empty/mixed/wrong-typed `xesam:artist`, `mpris:length` small-int variants + float/negative rejection, all guard paths, classification unit tests. 42 tests (was 14).
 
-## v1.2 — MPD + mpv hardening
+Deferred from v1.1: publishing `media.state_changed` to the kernel event bus. It
+needs `PERMISSION_EVENT_PUBLISH` plus an outbound path from the watcher task;
+the SDK's sequential serve loop owns `VeyronClient` exclusively (single-reader
+rule, `docs/PLUGIN_AUTHORING.md` §1), so events wait until the loop migration.
 
+## v1.2 — loop migration + MPD/mpv hardening
+
+- Migrate to the calendar-style single-reader select loop (RPC proxy + outbound channel); then publish `media.state_changed` opt-in behind declared `PERMISSION_EVENT_PUBLISH`.
 - MPD `NoTrack` handling done (0.2.0). Next: `media_queue`/`media_playlist` (TrackList `GetTracksMetadata` + `AddTrack`/`RemoveTrack`/`GoTo`) for MPD, gated behind `MEDIA_PLUGIN_ENABLE_TRACKLIST=false` default (browsers don't implement TrackList).
 
 ## v2 — remote providers (requires `network` + `secrets`)
