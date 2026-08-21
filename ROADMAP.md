@@ -88,6 +88,33 @@ supervisor/resource-limit config per README's "separate processes" model.
 `telegram` is a client, not a `notify` channel — it's two-way (replies,
 voice notes in), `notify` stays one-way alert delivery only.
 
+**Sketched, unnamed:** a fourth client that gives `agent` (Kairo) a visible
+body — an animated on-screen companion. A small always-on-top Wayland
+creature rendered on a `wlr-layer-shell` overlay surface (sprite rig,
+data-driven JSON animation clips): speech bubbles, emotes, idle behavior,
+reactions to system state; user interaction flows back through it (text
+prompt, click/drag). Like the other clients it talks to `agent`, but
+unlike them it also *embodies* it: body control (`say`/`emote`/`walk_to`/
+`vanish`/`sleep` — exact action names TBD) is served as ordinary manifest
+actions, so the agent drives its own avatar through the standard tool-call
+loop instead of prompt-side stage directions, and `telegram`/`webclient`
+can puppet the body too. Senses and effectors are never reimplemented
+in-process — voice is `stt`/`tts`, attention is `window` + `screenshot`,
+media is `media`, app launching is `launcher` — the same split earlier
+X11-hack prototypes did by hand, now behind permissions. Implementation
+sketch: a `veyron-sdk-rust` plugin process hosting the Wayland renderer
+itself (software sprite rasterizer; precedent for touching the desktop
+session from a plugin process is `media` on session D-Bus); if supervisor
+coupling to a GUI-bearing process proves annoying, split into a headless
+body plugin plus a thin renderer client later. Works unmodified on any
+layer-shell compositor (Hyprland, niri, sway/wlroots); compositor-specific
+bits stay out of the protocol — global hotkeys are compositor binds
+calling a local ctl socket, not a plugin capability. Depends on `ai` at
+MVP (chat without the goal loop), upgrades to `agent` when it ships; the
+full experience wants `stt`/`tts`, then `window`/`screenshot`. Permissions:
+none of its own beyond what it calls, same model as the other clients.
+No table row or directory until the name is decided.
+
 Considered and skipped: `contacts` (fold into `database` as a schema
 convention, not its own CRUD/permission), `translate` (`ai` chat completion
 already does this via prompt, no dedicated plugin needed), `sms` (external
