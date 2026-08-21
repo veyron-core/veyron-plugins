@@ -1,0 +1,54 @@
+# Example kernel config.yaml entry for the `search` plugin.
+# Copy this block into the top-level `plugins:` list of the kernel's
+# config.yaml, or into a `plugins.d/search.yaml` drop-in.
+#
+# `search` declares zero kernel permissions of its own beyond what it calls
+# (`network` + `secrets`, see ROADMAP.md) — it calls out through the
+# `network` plugin's `http_request` action instead of opening its own
+# sockets, and resolves provider keys from the `secrets` plugin's vault
+# first. So `network` (and, for vault-first keys, `secrets`) must also be
+# registered and running for `search` to do anything.
+
+plugins:
+  - id: search
+    binary: /opt/plugins/search      # path to the built `search` binary
+    restart: on-failure
+    max_restarts: 5
+    sandbox: true                    # search opens no sockets itself; network does
+    env:
+      # Required: every env var name a caller is allowed to reference via
+      # api_key_env, comma-separated, exact match. Default-deny — omitting
+      # this rejects every web_search request. Without it a caller could
+      # name *any* env var this process has (not just a provider key) and
+      # get its value sent straight into an outbound request header to a
+      # caller-controlled base_url.
+      - SEARCH_PLUGIN_ALLOWED_KEY_ENVS=SEARCH_BRAVE_KEY,SEARCH_TAVILY_KEY
+
+      # Provider keys. Callers reference these by name via "api_key_env"
+      # in their web_search request; the key itself never leaves the host.
+      #
+      # Resolution order is vault-first: at call time `search` asks the
+      # `secrets` plugin's vault for the key under the same name (its
+      # `secret_get` action), and only falls back to these env vars when
+      # the vault has no non-empty value. The vault wins when both exist.
+      # To store a key in the vault instead of an env var, have the
+      # operator run (via the web UI or another plugin):
+      #
+      #   secret_set {"name":"SEARCH_BRAVE_KEY","value":"..."}
+      #   secret_set {"name":"SEARCH_TAVILY_KEY","value":"tvly-..."}
+      #
+      # (the `secrets` plugin must be registered; `search` declares the
+      # `secrets` permission for this). Keys stored only in the vault may
+      # be dropped from this `env:` list entirely — the allowlist above
+      # gates the handle either way.
+      - SEARCH_BRAVE_KEY=<brave subscription token>
+      - SEARCH_TAVILY_KEY=tvly-...
+
+      # `network` must be able to reach the provider hosts (its SSRF
+      # blocklist blocks private ranges by default, but api.search.brave.com
+      # and api.tavily.com are public, so no override is normally needed).
+      # If you point base_url at an internal gateway instead, allowlist it:
+      # - NETWORK_PLUGIN_ALLOWED_HOSTS=search-gateway.internal
+    grace_seconds: 10
+    max_procs: 64
+    max_vmem_mb: 256
