@@ -2,6 +2,22 @@
 
 All notable changes to `media` follow Keep a Changelog + SemVer. `plugin.json` `version` mirrors `Cargo.toml`.
 
+## [0.0.3] — 2026-08-21 — v1.1 polish (13 actions, 42 tests)
+
+### Added
+- `media_seek_relative {offset_ms}` — signed offset from current position, clamps at 0; shares the absolute-seek core with `media_seek`.
+- Capability guards: `CanPlay`/`CanPause`/`CanGoNext`/`CanGoPrevious`/`CanSeek`/`CanControl` checked before calls → `ERR_MEDIA_NOT_SUPPORTED` naming the property; only explicit `false` blocks.
+- Background signal watcher (`spawn_watch_task`, one task per player): subscribes `PropertiesChanged` + `Seeked(int64)`, feeds `POS_CACHE` `(pos, rate, updated_at)` via `cache_note` — full BUG-2 fix for compliant players.
+- Window-capped extrapolation: `EXTRAPOLATION_MAX_AGE_MS` (120s); MPRIS needs no periodic Position updates, so older samples are not trusted.
+- Tests: negative metadata parsing (empty/mixed/wrong-typed artist, small-int/float/negative lengths), guard paths for every capability, seek_relative forward/backward/clamp, error classification unit tests, signal-fed cache + extrapolation window. 42 total (was 14).
+
+### Fixed
+- D-Bus errors reclassified (`classify_dbus`): `No such property`/`UnknownProperty`/`UnknownMethod`/`NotSupported` → `ERR_MEDIA_NOT_SUPPORTED` (was misreported as `PLAYER_VANISHED`, e.g. firefox Shuffle).
+- `parse_length_value` rejects negative lengths; mixed-type artist arrays unwrap `Value::Value`-wrapped elements.
+
+### Deferred
+- `media.state_changed` event publication → v1.2 loop migration (needs `PERMISSION_EVENT_PUBLISH` + outbound channel; single-reader rule on the sequential SDK loop).
+
 ## [0.0.2] — 2026-08-20 — fix/media-bugs-v1 (`fix/media-bugs-v1` branch) — originally 0.2.0, re-tagged as 0.0.2
 
 ### Added

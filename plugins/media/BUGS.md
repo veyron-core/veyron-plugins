@@ -53,16 +53,26 @@
 - **Expected:** absolute seek to `target_ms`.
 - **Actual:** `Position` stays 0 or clamps to ~1s; `Length` flips `null → 790M` after Seek (now cached).
 - **Root cause:** Firefox/Chromium MPRIS for HTML5 `<video>` clamps `Seek` large jumps to 0; `SetPosition` synthesizes `trackId /org/mpris/MediaPlayer2/firefox` but validates per element differently — zbus `ObjectPath` correct, but Firefox ignores synthetic path for YouTube.
-- **Fix in 0.2.0:** tried `SetPosition` primary with `ObjectPath::try_from`, fallback `Seek(delta)` on `NotSupported`; overflow guard `checked_mul`. Not enough for Firefox. Next: need `CanSeek` guard + maybe `OpenUri`+`Seek` for YouTube, or document as upstream wontfix. Regression tests kept: `seek_uses_set_position_primary`, `seek_fallback`, `seek_no_track`.
-- **Files:** `src/mpris.rs:set_position`, `seek_with` (BUG-1 comment).
+- **Fix in 0.2.0:** tried `SetPosition` primary with `ObjectPath::try_from`, fallback `Seek(delta)` on `NotSupported`; overflow guard `checked_mul`. Not enough for Firefox.
+- **Fix in 0.0.3:** `CanSeek` guard added (`seek_absolute_on`) per the original fix idea; Firefox reports `CanSeek=true`, so upstream behavior is unchanged — documented as an upstream browser bug, wontfix here. Regression tests kept: `seek_uses_set_position_primary`, `seek_fallback`, `seek_no_track`, plus new guard tests.
+- **Files:** `src/mpris.rs:set_position`, `seek_absolute_on`.
 
-### BUG-2 — `media_status` stale Position 0 (medium) — partially fixed
+## Fixed in 0.0.3
 
-- **Scope:** `status_with` + `extrapolate_position` + `POS_CACHE`
-- **Repro:** Firefox after `media_seek` → `media_status` `position_ms 0` while YouTube UI shows 6:23. `busctl get Position` `x 0`, `mpd get Position` stale until `PropertiesChanged`.
-- **Expected:** `position_ms` ≈ `elapsed since Play`, rate-aware.
-- **Actual 0.2.0:** added `POS_CACHE` + `extrapolate_position`: if `raw_pos==0 && Playing && rate!=0 && cached_pos>0` → `cached_pos + elapsed*rate`. Works for mpd (11s→11.1s). For Firefox where `raw_pos` never becomes >0, cache stays 0 so still `0`. Full fix needs `PropertiesChanged`/`Seeked` subscription via `zbus PropertyStream` and `PERMISSION_EVENT_PUBLISH` for `media.state_changed` (ROADMAP v1.1).
-- **Fix next:** subscribe `PropertiesChanged` on `org.mpris.MediaPlayer2.Player`, cache `(pos,rate,updated_at)` and publish event.
+### FIXED BUG-2 — `media_status` stale Position 0 (medium) — fully fixed for compliant players
+
+- **Scope:** signal watcher (`spawn_watch_task` / `run_watch`) + `POS_CACHE` + window-capped `extrapolate_position`
+- **Fix:** one watcher task per MPRIS player subscribes `org.freedesktop.DBus.Properties.PropertiesChanged` on `Player` and the `Seeked(int64)` signal, feeding `(pos, rate, updated_at)` into `POS_CACHE` via `cache_note`. `extrapolate_position` now trusts a cached sample only within `EXTRAPOLATION_MAX_AGE_MS` (120s) — MPRIS does not require periodic Position updates, so older samples are ignored. Works fully for compliant players (mpd verified pattern); Firefox stays limited by BUG-1 upstream (`raw_pos` never becomes >0 there).
+- **Event publication deferred:** `media.state_changed` needs `PERMISSION_EVENT_PUBLISH` + an outbound path from the watcher task; the SDK's simple sequential loop owns `VeyronClient` exclusively (single-reader rule, see `docs/PLUGIN_AUTHORING.md` §1). Deferred until media migrates to the calendar-style select loop (see ROADMAP v1.2). The watcher only ever writes static caches, so it is single-reader-safe today.
+
+### FIXED — capability guards + error reclassification
+
+- `CanPlay`/`CanPause`/`CanGoNext`/`CanGoPrevious`/`CanSeek`/`CanControl` checked before the corresponding calls → `ERR_MEDIA_NOT_SUPPORTED` naming the property. Only an explicit `false` blocks; missing/unreadable capability properties never block (minimal players keep working) — the underlying failure then surfaces through its own taxonomy.
+- D-Bus errors reclassified via `classify_dbus`: `No such property`/`UnknownProperty`/`UnknownMethod`/`NotSupported` → `ERR_MEDIA_NOT_SUPPORTED` (was misreported as `ERR_MEDIA_PLAYER_VANISHED`, e.g. firefox Shuffle); `ServiceUnknown`/`NameHasNoOwner` stay VANISHED.
+
+### FIXED — negative/odd metadata values
+
+- `parse_length_value` rejects negative lengths; mixed-type artist arrays (`av` with `Value::Value`-wrapped elements) unwrap correctly via `downcast_ref::<String>()`; wrong-typed scalar fields yield empty/None instead of panicking paths.
 
 ## Tech debt / ideas
 
@@ -72,15 +82,16 @@
 
 ### IDEA — `media_events` subscription
 
-- Subscribe `Seeked(int64)` + `PropertiesChanged` → `media.seeked`/`media.state_changed`. Requires `PERMISSION_EVENT_PUBLISH`.
+- Subscribe `Seeked(int64)` + `PropertiesChanged` → `media.seeked`/`media.state_changed`. Requires `PERMISSION_EVENT_PUBLISH`. Partially done in 0.0.3: signals are consumed by the background watcher and feed `POS_CACHE`; publishing events to the bus is deferred to the v1.2 loop migration (single-reader rule).
 
 ### IDEA — Extrapolate Rate fully
 
-- Done partially (0.2.0). Need `Rate` double (1.0 normal, 0.0 paused) multiplied on every `Position` delta; already in `extrapolate_position`.
+- Done partially (0.2.0). Need `Rate` double (1.0 normal, 0.0 paused) multiplied on every `Position` delta; already in `extrapolate_position`, now window-capped in 0.0.3.
 
-### IDEA — `media_seek_relative`, `Can*` guards
+### DONE in 0.0.3 — `media_seek_relative`, `Can*` guards
 
-- `CanSeek/CanControl/CanPause` check before calling → `ERR_MEDIA_NOT_SUPPORTED`.
+- `CanSeek/CanControl/CanPause/CanPlay/CanGoNext/CanGoPrevious` check before calling → `ERR_MEDIA_NOT_SUPPORTED`.
+- `media_seek_relative {offset_ms}` — signed offset, clamps at 0, shares the absolute-seek core with `media_seek`.
 
 ## Real test log (2026-08-20)
 
