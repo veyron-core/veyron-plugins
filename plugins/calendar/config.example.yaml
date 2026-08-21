@@ -1,0 +1,14 @@
+# calendar plugin config. Copy to config.yaml; every key is optional.
+db_timeout_ms: 5000   # timeout for each database IPC call (db_incr/db_set/db_get/db_keys/db_batch_get/db_delete)
+scan_secs: 30         # reminder scan interval in seconds; 0 disables scanning entirely
+notify_enabled: true  # also deliver fired reminders through the notify plugin (best-effort, never fails the scan)
+
+# Reminder model (v1):
+#   - an event participates only when remind_before_ms is set (0 = fire exactly at start_ms);
+#   - a fired reminder is marked reminder_fired BEFORE publishing (at-most-once);
+#   - reminders that came due while the plugin was down fire once on the next
+#     scan with late: true — there is no maximum-lateness cutoff yet;
+#   - updating start_ms/end_ms resets reminder_fired so the new time reminds again.
+# Every mutation publishes a best-effort `plugin.calendar.changed` event
+# {op: created|updated|deleted, id}; every fired reminder publishes
+# `plugin.calendar.due` {event_id, title, start_ms, remind_at_ms, late}.

@@ -28,6 +28,8 @@ file is the cross-plugin picture only.
 | `notify` | `plugins/notify/` | — | desktop/system notifications via host binaries — `notify-send` (libnotify), `wall`, `espeak`; argv-only spawn, never a shell (`PERMISSION_NOTIFY`). v0.2: `speak: true` озвучка через `tts`-плагин (`tts_synthesize` + локальный плеер), `silent: true` + inbox (`notify_list`/`notify_mark_read`/`notify_delete`) — скрытые уведомления, которые будущий `agent` сможет просматривать |
 | `sync` | `plugins/sync/` | — | host-side sync state primitive (D-13): versioned SQLite KV + `sync_get_snapshot`/`sync_get`/`sync_set`/`sync_del`, publishes `sync.delta` events on every mutation (`PERMISSION_STORAGE`, `PERMISSION_EVENT_PUBLISH`) |
 | `sync-client` | `plugins/sync-client/` | `sync` | client-side mirror + heartbeat scheduler (D-13): subscribes to `sync.delta`, pulls `sync_get_snapshot` on (re)connect to catch up, pushes its heartbeat into host state via `sync_set` on a timer (`PERMISSION_SCHEDULER`, `PERMISSION_IPC_SEND`) |
+| `notes` | `plugins/notes/` | `database` | note CRUD as a thin schema layer over `database`'s KV (`note:<id>` JSON docs, atomic id counter), publishes `plugin.notes.changed`; callers need no storage permission — `notes` holds it (T-19) |
+| `calendar` | `plugins/calendar/` | `database`, `notify` | event CRUD + reminders: opt-in `remind_before_ms`, timer scan fires once at-most (`late` flag after downtime), publishes `plugin.calendar.changed`/`.due`, best-effort `notify_send`; rescheduling resets the fired flag |
 
 ## Planned
 
@@ -39,7 +41,6 @@ Dependency order — each row can start once everything in "depends on" ships.
 | `scheduler` | fire an action/event once after a delay, or repeatedly on a cron expr | `database` (persist schedule state across restarts) | `PERMISSION_SCHEDULER` (existing) |
 | `vector-db` | embedding upsert/similarity search (`vec_upsert`/`vec_query`) | — | own storage backend, standalone |
 | `search` | web search (grounding, not just fetch) | `network` | `network` (caller of gated `http_request`) |
-| `notify` | push/desktop/webhook notifications | — | `PERMISSION_NOTIFY` (existing) |
 | `email` | send/receive mail (SMTP/IMAP) | `network`, `secrets` (mailbox creds) | `network` (caller of gated `http_request`) |
 | `image` | image gen + vision (describe/OCR) | `network` (provider API), `secrets` | `network` (caller of gated `http_request`) |
 | `clipboard` | read/write system clipboard | — | `PERMISSION_CLIPBOARD` (defined, proto v1.4) |
@@ -50,15 +51,15 @@ Dependency order — each row can start once everything in "depends on" ships.
 | `window` | list/focus/switch/minimize/maximize open windows | — | `PERMISSION_SYSTEM` (existing, shares scope with `system`) |
 | `home` | home automation over a custom protocol to bare-metal devices (ESP32/Arduino) — not Home Assistant/MQTT, own wire format | `network` (or serial/BLE transport, TBD) | `PERMISSION_HOME` (defined, proto v1.4) |
 | `browser` | read/control active browser tab (url/title/DOM/screenshot) — native-messaging host (the actual plugin, built on `veyron-sdk-rust`) + a browser extension (Chrome/Firefox) as the tab-access side | — | `PERMISSION_BROWSER` (existing, unused today) |
-| `notes` | note CRUD | `database` | none |
-| `calendar` | event CRUD + reminders + `notify` on due | `database`, `scheduler`, `notify` | none |
 | `agent` | multi-step goal loop: `ai` chat + tool-call dispatch to other plugins' actions, state persisted | `ai`, `database`, `vector-db`, `scheduler` | none itself — inherits from what it calls |
 | `webclient` | browser chat UI + mic voice input/TTS playback, talks to kernel WS API | `agent` (Kairo), `stt`, `tts` | none itself — client only, auth via kernel JWT |
 | `daemon` | headless background service: mic listen loop, TTS output, no window/browser | `agent` (Kairo), `stt`, `tts` | none itself — client only, auth via kernel JWT |
 | `telegram` | third client: two-way chat + voice notes via Telegram bot API | `agent` (Kairo), `stt`, `tts`, `secrets` (bot token) | none itself — client only |
 
-`notes`/`calendar` are thin once `database` exists — just schema + validation
-on top of it, same relationship `ai` has to `network`.
+`notes` and `calendar` shipped as exactly that — thin schema + validation on
+top of `database`, same relationship `ai` has to `network`. Calendar's v1
+reminder scan is an internal timer loop; migrating firing to the future
+`scheduler` plugin stays an open option (`plugins/calendar/ROADMAP.md`).
 
 Under the Manifest v2 data-driven permission model (§3), any plugin that
 invokes `network`'s gated `http_request` — the shipped `ai`/`tts`/`stt` and
@@ -87,6 +88,33 @@ background, `telegram` is driven by bot API polling/webhook — different
 supervisor/resource-limit config per README's "separate processes" model.
 `telegram` is a client, not a `notify` channel — it's two-way (replies,
 voice notes in), `notify` stays one-way alert delivery only.
+
+**Sketched, unnamed:** a fourth client that gives `agent` (Kairo) a visible
+body — an animated on-screen companion. A small always-on-top Wayland
+creature rendered on a `wlr-layer-shell` overlay surface (sprite rig,
+data-driven JSON animation clips): speech bubbles, emotes, idle behavior,
+reactions to system state; user interaction flows back through it (text
+prompt, click/drag). Like the other clients it talks to `agent`, but
+unlike them it also *embodies* it: body control (`say`/`emote`/`walk_to`/
+`vanish`/`sleep` — exact action names TBD) is served as ordinary manifest
+actions, so the agent drives its own avatar through the standard tool-call
+loop instead of prompt-side stage directions, and `telegram`/`webclient`
+can puppet the body too. Senses and effectors are never reimplemented
+in-process — voice is `stt`/`tts`, attention is `window` + `screenshot`,
+media is `media`, app launching is `launcher` — the same split earlier
+X11-hack prototypes did by hand, now behind permissions. Implementation
+sketch: a `veyron-sdk-rust` plugin process hosting the Wayland renderer
+itself (software sprite rasterizer; precedent for touching the desktop
+session from a plugin process is `media` on session D-Bus); if supervisor
+coupling to a GUI-bearing process proves annoying, split into a headless
+body plugin plus a thin renderer client later. Works unmodified on any
+layer-shell compositor (Hyprland, niri, sway/wlroots); compositor-specific
+bits stay out of the protocol — global hotkeys are compositor binds
+calling a local ctl socket, not a plugin capability. Depends on `ai` at
+MVP (chat without the goal loop), upgrades to `agent` when it ships; the
+full experience wants `stt`/`tts`, then `window`/`screenshot`. Permissions:
+none of its own beyond what it calls, same model as the other clients.
+No table row or directory until the name is decided.
 
 Considered and skipped: `contacts` (fold into `database` as a schema
 convention, not its own CRUD/permission), `translate` (`ai` chat completion
@@ -161,8 +189,11 @@ maintain):
 existing tests — including the deadlock-regression and per-caller-cap tests —
 pass unchanged. `vector-db`, `scheduler`, and anything else on the hot path
 get the pattern for free by implementing `ConcurrentHandler`. `notes`/
-`calendar` still inherit it for free — they just call `database`, they don't
-need their own concurrency handling. Rust only for these — no Python/C++
+`calendar` don't implement it — they're CRUD wrappers that call `database`
+through a channel-fronted RPC proxy so their serve loop remains the single
+reader of the connection (`send_action`'s discard-while-waiting would
+otherwise eat inbound frames during handler or timer-driven outbound calls).
+Rust only for these — no Python/C++
 SDK versions of `database` or `vector-db`; hot-path plugins stay in the SDK
 with the async pool story.
 
