@@ -1,0 +1,8 @@
+# notes plugin config. Copy to config.yaml; every key is optional.
+db_timeout_ms: 5000   # timeout for each database IPC call (db_incr/db_set/db_get/db_keys/db_batch_get/db_delete)
+
+# Notes are stored as JSON documents under `note:<id>` in the plugin's own
+# `database` namespace; ids come from an atomic `meta:next_id` counter.
+# Every mutation publishes a best-effort `plugin.notes.changed` event
+# {op: created|updated|deleted, id} (requires the plugin's
+# PERMISSION_EVENT_PUBLISH, declared in the manifest).
