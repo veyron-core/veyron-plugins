@@ -1,0 +1,21 @@
+# filesystem plugin config — copy to the kernel's plugins.d/ drop-in dir.
+
+plugin_id: filesystem
+binary: ./target/release/filesystem
+restart: on-failure
+sandbox: true
+
+# Environment the plugin is spawned with (see config_schema in plugin.json).
+env:
+  # REQUIRED for any action to work. Comma-separated absolute directory
+  # paths the plugin is allowed to touch. Unset/empty = deny-all: every
+  # action fails with ERR_FILES_NO_ROOTS. Relative and nonexistent roots are
+  # skipped at startup with a loud log line.
+  FILES_PLUGIN_ALLOWED_ROOTS: /var/lib/veyron/files,/home/user/Documents
+
+  # Cap on fs_list entries (default 1000); listings past this are truncated.
+  FILES_PLUGIN_MAX_LIST_ENTRIES: "1000"
+
+  # Default fs_read window in bytes (default 1048576 = 1 MiB). Hard-capped at
+  # 8388608 (8 MiB) — values above are clamped.
+  FILES_PLUGIN_MAX_READ_BYTES: "1048576"
