@@ -33,6 +33,8 @@ even when prose says vynkor.
 | `media` | `plugins/media/` | — | Local MPRIS media playback control: 13 actions (`play/pause/play_pause/next/prev/stop/seek/seek_relative/volume/status/list_players/shuffle/loop`) over the session D-Bus via `zbus`; capability guards (`CanPlay`/`CanPause`/… → `ERR_MEDIA_NOT_SUPPORTED`), background `PropertiesChanged`/`Seeked` watcher feeding the position cache, unified `ERR_MEDIA_*` taxonomy. Fully offline (`permissions: []`). See `plugins/media/README.md`. |
 | `clipboard` | `plugins/clipboard/` | `PERMISSION_CLIPBOARD` | Text clipboard read/write via host binaries — `wl-paste`/`wl-copy` (Wayland), `xclip`/`xsel` (X11); argv-only spawn, never a shell; size cap + per-spawn timeout. See `plugins/clipboard/README.md`. |
 
+| `system` | `plugins/system/` | `PERMISSION_SYSTEM` | Local host queries + simple reversible controls: `sys_info`/`sys_battery`/`sys_procs`/`sys_volume[_set/_mute]`/`sys_brightness[_set]`/`sys_lock`/`sys_power_profile[_set]`. Backend detection with graceful `ERR_SYS_NOT_SUPPORTED`; Linux: UPower, wpctl→pactl, sysfs→brightnessctl (brightness clamps to non-blanking floor), ScreenSaver→loginctl, power-profiles-daemon; macOS: pmset/osascript/CGSession. Offline (`sandbox: false` for D-Bus/spawns). See `plugins/system/README.md`. |
+
 Writing a new plugin? Start with [`docs/PLUGIN_AUTHORING.md`](docs/PLUGIN_AUTHORING.md) —
 the single-reader loop / RPC-proxy pattern, kernel routing facts (T-19/T-04),
 and the fake-kernel test harness.

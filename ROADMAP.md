@@ -34,6 +34,7 @@ file is the cross-plugin picture only.
 | `clipboard` | `plugins/clipboard/` | — | text clipboard read/write via host binaries — `wl-paste`/`wl-copy` (Wayland), `xclip`/`xsel` (X11); argv-only spawn, never a shell; size cap + per-spawn timeout (`PERMISSION_CLIPBOARD`, proto v1.4) |
 | `filesystem` | `plugins/filesystem/` | — | sandboxed file read/write + read-only browse (`fs_list`/`fs_read`/`fs_write`) behind a default-deny allowlist of absolute roots (`FILES_PLUGIN_ALLOWED_ROOTS`); deepest-existing-ancestor canonicalize blocks `..` traversal and symlink escapes; write refuses symlink/dir/root targets (`PERMISSION_FILES_READ`/`WRITE`). v0.1.0: 33 tests |
 | `search` | `plugins/search/` | `network`, `secrets` | web search (`web_search`) via brave/tavily adapters routed through `network`'s gated `http_request` (T-19 caller), keys vault-first via `secrets`, `SEARCH_PLUGIN_ALLOWED_KEY_ENVS` default-deny allowlist; normalized `{query, results[{title,url,snippet}]}`. v0.1.0: 34 tests incl. fake-kernel end-to-end |
+| `system` | `plugins/system/` | — | local host queries + reversible controls — `sys_info`/`sys_battery`/`sys_procs`/`sys_volume[_set/_mute]`/`sys_brightness[_set]`/`sys_lock`/`sys_power_profile[_set]` behind one `PERMISSION_SYSTEM`; backend traits + startup detection, absent capability → `ERR_SYS_NOT_SUPPORTED` naming it. Linux: UPower DisplayDevice, wpctl→pactl, sysfs write→brightnessctl fallback (0 clamps to non-blanking step), ScreenSaver→loginctl chain, ppd both name/path generations; macOS: pmset/osascript/CGSession via non-gated pure parsers. v0.3.0: 45 unit + 4 fake-kernel e2e tests |
 
 ## Planned
 
@@ -44,10 +45,13 @@ Dependency order — each row can start once everything in "depends on" ships.
 | `scheduler` | fire an action/event once after a delay, or repeatedly on a cron expr | `database` (persist schedule state across restarts) | `PERMISSION_SCHEDULER` (existing) |
 | `vector-db` | embedding upsert/similarity search (`vec_upsert`/`vec_query`) | — | own storage backend, standalone |
 | `email` | send/receive mail (SMTP/IMAP) | `network`, `secrets` (mailbox creds) | `network` (caller of gated `http_request`) |
-| `image` | image gen + vision (describe/OCR) | `network` (provider API), `secrets` | `network` (caller of gated `http_request`) |
-| `system` | query host info (battery, procs, volume, screen lock) | — | `PERMISSION_SYSTEM` (existing) — broad access, keep strict |
 | `launcher` | launch apps/games by name — Steam (`steam://rungameid/<id>`, reads `libraryfolders.vdf`/`appmanifest_*.acf`) as one provider, generic app launch as another | `filesystem` (read manifests) | `PERMISSION_LAUNCH` (defined, proto v1.4) |
-| `screenshot` | capture screen/window, optional OCR | `image` (OCR) | `PERMISSION_SCREEN` (defined, proto v1.4) |
+| `capture` | screen/window capture + webcam frame + video recording — one PipeWire-based plugin (screen portal / V4L2 share the stack); OCR is a local tesseract spawn over its own frames (argv-only like `clipboard`/`notify`, fully offline; cloud-vision OCR stays available via `ai` vision for hard cases). Absorbs the old standalone `screenshot` row and the `camera` idea | — | `PERMISSION_SCREEN` (defined, proto v1.4), `PERMISSION_CAMERA` (new, enum 23) |
+| `sound` | audio output primitive: `sound_play`/`sound_stop`/`sound_status` — play bytes/file at a given volume/device, spawn `pw-cat`/`paplay`/`ffplay` per clip (argv-only). The single owner of the speakers: `tts` synthesizes but doesn't play host-side, `notify` migrates its `speak:true` built-in player here, ducking hook lowers `media` MPRIS volume while something speaks | — | `PERMISSION_AUDIO` (existing) |
+| `wifi` | Wi-Fi control via NetworkManager D-Bus: scan/list/connect/disconnect/forget/toggle radio, known-network management. Credentials stay in NM's own profile store — the plugin orchestrates and never handles raw PSKs | — | `PERMISSION_WIFI` (new, enum 20) |
+| `bluetooth` | device list/scan/pair/connect/disconnect, battery level, audio-profile select — BlueZ over D-Bus via zbus (same stack as `media`) | — | `PERMISSION_BLUETOOTH` (new, enum 21) |
+| `input` | virtual keyboard/mouse injection — type/click/move/scroll/key-tap via `ydotool`/`wtype`/`xdotool` spawn (argv-only); the agent's hands next to `window` (focus) and `capture` (eyes) | — | `PERMISSION_INPUT` (new, enum 22) |
+| `metrics` | periodic host samples (CPU/RAM/disk/battery/network) into own SQLite + range/query API for webclient graphs; timer loop like calendar's reminder scan, own storage file like vector-db's backend | — | `PERMISSION_STORAGE` (existing) |
 | `window` | list/focus/switch/minimize/maximize open windows | — | `PERMISSION_SYSTEM` (existing, shares scope with `system`) |
 | `home` | home automation over a custom protocol to bare-metal devices (ESP32/Arduino) — not Home Assistant/MQTT, own wire format | `network` (or serial/BLE transport, TBD) | `PERMISSION_HOME` (defined, proto v1.4) |
 | `browser` | read/control active browser tab (url/title/DOM/screenshot) — native-messaging host (the actual plugin, built on `veyron-sdk-rust`) + a browser extension (Chrome/Firefox) as the tab-access side | — | `PERMISSION_BROWSER` (existing, unused today) |
@@ -63,7 +67,7 @@ reminder scan is an internal timer loop; migrating firing to the future
 
 Under the Manifest v2 data-driven permission model (§3), any plugin that
 invokes `network`'s gated `http_request` — the shipped
-`ai`/`tts`/`stt`/`search` and the planned `email`/`image` — declares
+`ai`/`tts`/`stt`/`search` and the planned `email` — declares
 `PERMISSION_NETWORK` itself: T-19 requires the *caller* of a gated action to
 hold its permission,
 and the per-action `permission` in `network`'s manifest makes that check
@@ -101,7 +105,7 @@ unlike them it also *embodies* it: body control (`say`/`emote`/`walk_to`/
 actions, so the agent drives its own avatar through the standard tool-call
 loop instead of prompt-side stage directions, and `telegram`/`webclient`
 can puppet the body too. Senses and effectors are never reimplemented
-in-process — voice is `stt`/`tts`, attention is `window` + `screenshot`,
+in-process — voice is `stt`/`tts`, attention is `window` + `capture`,
 media is `media`, app launching is `launcher` — the same split earlier
 X11-hack prototypes did by hand, now behind permissions. Implementation
 sketch: a `veyron-sdk-rust` plugin process hosting the Wayland renderer
@@ -113,13 +117,22 @@ layer-shell compositor (Hyprland, niri, sway/wlroots); compositor-specific
 bits stay out of the protocol — global hotkeys are compositor binds
 calling a local ctl socket, not a plugin capability. Depends on `ai` at
 MVP (chat without the goal loop), upgrades to `agent` when it ships; the
-full experience wants `stt`/`tts`, then `window`/`screenshot`. Permissions:
+full experience wants `stt`/`tts`, then `window`/`capture`. Permissions:
 none of its own beyond what it calls, same model as the other clients.
 No table row or directory until the name is decided.
 
 Considered and skipped: `contacts` (fold into `database` as a schema
 convention, not its own CRUD/permission), `translate` (`ai` chat completion
-already does this via prompt, no dedicated plugin needed), `sms` (external
+already does this via prompt, no dedicated plugin needed), `image`
+(image *generation* and *vision* are just more provider calls — vision is
+`chat_completion` with base64 image content blocks, same providers, same
+vault-first keys, same gated `http_request` routing — so both move into
+`ai`'s plan, see `plugins/ai/ROADMAP.md`; local OCR belongs to whoever
+holds the pixels, so `capture` runs tesseract over its own frames,
+argv-only like `clipboard`/`notify`. A standalone OCR-of-arbitrary-images
+plugin stays YAGNI until a real consumer exists — e.g. an agent reading
+photos/receipts — and would then be a tiny tesseract-spawn plugin, not a
+network+secrets one), `sms` (external
 per-message cost for uncertain payoff — `telegram`/`notify` cover the
 notification-to-phone case already), `shell` (arbitrary command exec breaks
 the narrow-permission-per-plugin model every other plugin follows —
@@ -233,6 +246,15 @@ What's actually new, in `veyron`:
   on protocol **v1.5** (`veyron-wire` 0.2.2, 2026-08-13): `ActionStatus`/
   `CommandStatus` now have `*_UNKNOWN = 0` so a missed `set_status()` fails
   loudly instead of faking OK.
+
+  **Next batch (not yet defined in proto)** — when the new plugins land,
+  values continue contiguously at **20–23**, same installer-probe
+  constraint: `PERMISSION_WIFI` = 20 (`wifi`),
+  `PERMISSION_BLUETOOTH` = 21 (`bluetooth`), `PERMISSION_INPUT` = 22
+  (`input`), `PERMISSION_CAMERA` = 23 (`capture`). One wire bump covers
+  all four; land them together or keep the gap rule in mind if split.
+  `sound`, `metrics`, and the extended `system` need no new values — they
+  reuse existing ones.
 - **Regenerate `veyron-wire` prost types.** **Shipped** — the generated
   `PermissionType` (prost, build-time from the proto) includes the new
   values; `known_permissions()` (kernel `R8-01`) and the JWT `permissions`
