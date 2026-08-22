@@ -4,7 +4,7 @@
 //! map the response back to `ai`'s normalized shape. Also hosts the
 //! discovery/listing actions backed by the database.
 
-use veyron_sdk::VeyronClient;
+use vynkor_sdk::VynkorClient;
 
 use crate::config::DiscoverySource;
 use crate::db::{AiDb, UsageRow};
@@ -30,7 +30,7 @@ struct NetworkHttpResponse {
 /// `ActionResponse.data_json` on success, or a human-readable error
 /// (never containing the resolved API key) on failure.
 pub async fn handle_chat_completion(
-    client: &mut VeyronClient,
+    client: &mut VynkorClient,
     params_json: &[u8],
     db: &AiDb,
 ) -> Result<Vec<u8>, String> {
@@ -65,7 +65,7 @@ pub async fn handle_chat_completion(
         .await
         .map_err(|e| format!("network plugin call failed: {e}"))?;
 
-    if action_resp.status != veyron_sdk::proto::ActionStatus::ActionOk as i32 {
+    if action_resp.status != vynkor_sdk::proto::ActionStatus::ActionOk as i32 {
         return Err(format!("network plugin error: {}", action_resp.error));
     }
 
@@ -195,7 +195,7 @@ pub fn handle_usage_stats(db: &AiDb) -> Result<Vec<u8>, String> {
 /// `refresh_models` — pull the configured providers' model lists and upsert
 /// them into the database.
 pub async fn handle_refresh_models(
-    client: &mut VeyronClient,
+    client: &mut VynkorClient,
     db: &AiDb,
     sources: &[DiscoverySource],
 ) -> Result<Vec<u8>, String> {

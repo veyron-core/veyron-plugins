@@ -11,10 +11,10 @@ mod handler;
 mod providers;
 
 use serde_json::Value;
-use veyron_sdk::proto::{
+use vynkor_sdk::proto::{
     envelope, ActionRequest, ActionResponse, ActionStatus, Envelope, PluginManifest,
 };
-use veyron_sdk::{Plugin, VeyronClient, VeyronError};
+use vynkor_sdk::{Plugin, VynkorClient, VynkorError};
 
 const PLUGIN_ID: &str = "clipboard";
 const PLUGIN_VERSION: &str = "0.1.0";
@@ -41,11 +41,11 @@ impl Plugin for ClipboardPlugin {
         }
     }
 
-    async fn on_init(&mut self, _client: &mut VeyronClient) -> Result<(), VeyronError> {
+    async fn on_init(&mut self, _client: &mut VynkorClient) -> Result<(), VynkorError> {
         Ok(())
     }
 
-    async fn on_message(&mut self, envelope: Envelope) -> Result<Option<Envelope>, VeyronError> {
+    async fn on_message(&mut self, envelope: Envelope) -> Result<Option<Envelope>, VynkorError> {
         match envelope.payload {
             Some(envelope::Payload::ActionRequest(req)) => {
                 let response = handle_action_request(req).await;
@@ -58,7 +58,7 @@ impl Plugin for ClipboardPlugin {
         }
     }
 
-    async fn on_shutdown(&mut self) -> Result<(), VeyronError> {
+    async fn on_shutdown(&mut self) -> Result<(), VynkorError> {
         Ok(())
     }
 }
@@ -142,6 +142,6 @@ fn err_response(action_id: String, error: String) -> ActionResponse {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), VeyronError> {
+async fn main() -> Result<(), VynkorError> {
     ClipboardPlugin.run().await
 }

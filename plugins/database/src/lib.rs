@@ -2,7 +2,7 @@
 //!
 //! The [`ConcurrentHandler`] implementation for [`Handler`] lives here (not
 //! in the binary crate) because of the orphan rule: the trait comes from
-//! `veyron-sdk` and the type from this crate, so the impl must be written
+//! `vynkor-sdk` and the type from this crate, so the impl must be written
 //! where the type is defined. It wires the SDK's concurrent message loop to
 //! this plugin's request dispatcher.
 
@@ -10,9 +10,9 @@ pub mod db;
 pub mod handler;
 pub mod request;
 
-use veyron_sdk::concurrent::response_envelope;
-use veyron_sdk::proto::{envelope, ActionRequest, Envelope, EventPublish, PluginManifest};
-use veyron_sdk::ConcurrentHandler;
+use vynkor_sdk::concurrent::response_envelope;
+use vynkor_sdk::proto::{envelope, ActionRequest, Envelope, EventPublish, PluginManifest};
+use vynkor_sdk::ConcurrentHandler;
 
 use handler::{ChangeEvent, Handler};
 

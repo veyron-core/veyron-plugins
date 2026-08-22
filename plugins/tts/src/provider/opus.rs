@@ -2,7 +2,7 @@
 //!
 //! sherpa-onnx synthesizes PCM (`f32` samples); the wire prefers Opus for
 //! bandwidth on the network path (`AudioStreamChunk.codec == OPUS`, see
-//! `veyron_protocol.proto`). This module owns the PCM→Opus conversion: frame
+//! `vynkor_protocol.proto`). This module owns the PCM→Opus conversion: frame
 //! sizing, bitrate, and the encoder state. Pure data in/out — no client, no
 //! kernel, no model — so it's fully unit-testable without model files.
 

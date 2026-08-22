@@ -13,8 +13,8 @@ name = "network"
 path = "src/main.rs"
 
 [dependencies]
-veyron-sdk = "0.1"
-veyron-wire = "0.2"
+vynkor-sdk = "0.0.3"
+vynkor-wire = "0.0.2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "brotli", "deflate", "zstd"] }
 serde = { version = "1", features = ["derive"] }

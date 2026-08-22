@@ -4,15 +4,15 @@
 //!
 //! Same shape as `ai` (see plugins/ai/src/main.rs): doesn't use the SDK's
 //! `Plugin::run`/`serve` loop because `Plugin::on_message` only gets
-//! `&mut self`, not `&mut VeyronClient`, and the kernel rejects a second
+//! `&mut self`, not `&mut VynkorClient`, and the kernel rejects a second
 //! connection under the same `plugin_id`. So this plugin drives its own
 //! loop, near-identical to the SDK's `serve()`, calling the handler with the
-//! loop's own `&mut VeyronClient` in hand. Sequential, one request at a
+//! loop's own `&mut VynkorClient` in hand. Sequential, one request at a
 //! time — same model `network`, `ai`, `tts`, and `ping-pong-rs` already use.
 
 use search_plugin::handler;
-use veyron_sdk::proto::{envelope, ActionResponse, ActionStatus, Envelope, PluginManifest, Pong};
-use veyron_sdk::{VeyronClient, VeyronError};
+use vynkor_sdk::proto::{envelope, ActionResponse, ActionStatus, Envelope, PluginManifest, Pong};
+use vynkor_sdk::{VynkorClient, VynkorError};
 
 const PLUGIN_ID: &str = "search";
 const PLUGIN_VERSION: &str = "0.1.0";
@@ -38,8 +38,8 @@ fn unix_millis() -> u64 {
 }
 
 async fn handle_action_request(
-    client: &mut VeyronClient,
-    req: veyron_sdk::proto::ActionRequest,
+    client: &mut VynkorClient,
+    req: vynkor_sdk::proto::ActionRequest,
 ) -> Envelope {
     let reply = match req.action.as_str() {
         "web_search" => match handler::handle_web_search(client, &req.params_json).await {
@@ -69,13 +69,13 @@ async fn handle_action_request(
     }
 }
 
-async fn serve(mut client: VeyronClient) -> Result<(), VeyronError> {
-    let jwt_token = std::env::var("VEYRON_JWT_TOKEN").unwrap_or_default();
+async fn serve(mut client: VynkorClient) -> Result<(), VynkorError> {
+    let jwt_token = std::env::var("VYN_JWT_TOKEN").unwrap_or_default();
     let ack = client
         .register_full(PLUGIN_ID, PLUGIN_VERSION, manifest(), &jwt_token)
         .await?;
     if !ack.accepted {
-        return Err(VeyronError::PermissionDenied(format!(
+        return Err(VynkorError::PermissionDenied(format!(
             "registration rejected: {}",
             ack.reject_reason
         )));
@@ -119,15 +119,15 @@ async fn serve(mut client: VeyronClient) -> Result<(), VeyronError> {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), VeyronError> {
-    let socket_path = std::env::var("VEYRON_SOCKET_PATH")
-        .unwrap_or_else(|_| veyron_wire::socket::default_socket_path());
-    let secret = std::env::var("VEYRON_JWT_SECRET")
+async fn main() -> Result<(), VynkorError> {
+    let socket_path = std::env::var("VYN_SOCKET_PATH")
+        .unwrap_or_else(|_| vynkor_wire::socket::default_socket_path());
+    let secret = std::env::var("VYN_JWT_SECRET")
         .ok()
         .filter(|s| !s.is_empty());
     let client = match secret {
-        Some(s) => VeyronClient::connect_with_secret(&socket_path, s.as_bytes()).await?,
-        None => VeyronClient::connect(&socket_path).await?,
+        Some(s) => VynkorClient::connect_with_secret(&socket_path, s.as_bytes()).await?,
+        None => VynkorClient::connect(&socket_path).await?,
     };
     serve(client).await
 }
@@ -140,7 +140,7 @@ mod tests {
     use std::time::Duration;
     use tokio::net::UnixStream;
     use tokio::sync::Mutex;
-    use veyron_sdk::proto::{ActionResponse as ProtoActionResponse, PluginRegisterAck};
+    use vynkor_sdk::proto::{ActionResponse as ProtoActionResponse, PluginRegisterAck};
 
     const VAULT_KEY: &str = "vault-key-123";
     const ENV_DECOY_KEY: &str = "env-decoy-key";
@@ -221,8 +221,8 @@ mod tests {
     async fn start_plugin(secret_data: serde_json::Value, http_data: serde_json::Value) -> Shim {
         test_env();
         let (plugin_side, kernel_side) = UnixStream::pair().unwrap();
-        let plugin_client = VeyronClient::from_stream(plugin_side, None);
-        let kernel_client = VeyronClient::from_stream(kernel_side, None);
+        let plugin_client = VynkorClient::from_stream(plugin_side, None);
+        let kernel_client = VynkorClient::from_stream(kernel_side, None);
         tokio::spawn(async move {
             let _ = serve(plugin_client).await;
         });
@@ -246,7 +246,7 @@ mod tests {
     }
 
     async fn run_shim(
-        mut kernel: VeyronClient,
+        mut kernel: VynkorClient,
         mut rx: tokio::sync::mpsc::Receiver<Cmd>,
         http_requests: HttpRequests,
         secret_gets: SecretGets,
@@ -361,7 +361,7 @@ mod tests {
                             pending.insert(action_id.clone(), reply);
                             let env = Envelope {
                                 payload: Some(envelope::Payload::ActionRequest(
-                                    veyron_sdk::proto::ActionRequest {
+                                    vynkor_sdk::proto::ActionRequest {
                                         action_id,
                                         action,
                                         params_json: serde_json::to_vec(&params).unwrap(),

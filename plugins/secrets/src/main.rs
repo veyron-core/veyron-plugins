@@ -1,20 +1,20 @@
 //! `secrets` plugin entry point.
 //!
-//! Connects to the kernel over `VEYRON_SOCKET_PATH` (via
-//! `VeyronClient::connect_from_env`), then drives the SDK's concurrent
+//! Connects to the kernel over `VYN_SOCKET_PATH` (via
+//! `VynkorClient::connect_from_env`), then drives the SDK's concurrent
 //! message loop — requests run concurrently, replies may come back out of
 //! order, and the kernel correlates them by `action_id`.
 
 use secrets_plugin::{handler_from_env, PLUGIN_ID};
-use veyron_sdk::concurrent::serve_concurrent;
-use veyron_sdk::{VeyronClient, VeyronError};
+use vynkor_sdk::concurrent::serve_concurrent;
+use vynkor_sdk::{VynkorClient, VynkorError};
 
 #[tokio::main]
-async fn main() -> Result<(), VeyronError> {
+async fn main() -> Result<(), VynkorError> {
     let handler = handler_from_env();
 
-    let client = VeyronClient::connect_from_env().await?;
-    let token = std::env::var("VEYRON_JWT_TOKEN").unwrap_or_default();
+    let client = VynkorClient::connect_from_env().await?;
+    let token = std::env::var("VYN_JWT_TOKEN").unwrap_or_default();
     serve_concurrent(client, &token, handler).await?;
 
     println!("[{PLUGIN_ID}] shutting down");
@@ -27,9 +27,9 @@ mod tests {
     use secrets_plugin::request;
     use std::sync::Arc;
     use tokio::net::UnixStream;
-    use veyron_sdk::concurrent::run_concurrent_loop;
-    use veyron_sdk::proto::{envelope, ActionRequest, ActionStatus, Envelope, PluginShutdown};
-    use veyron_sdk::VeyronClient;
+    use vynkor_sdk::concurrent::run_concurrent_loop;
+    use vynkor_sdk::proto::{envelope, ActionRequest, ActionStatus, Envelope, PluginShutdown};
+    use vynkor_sdk::VynkorClient;
 
     fn test_handler() -> Arc<Handler> {
         let dir = tempfile::tempdir().unwrap();
@@ -69,8 +69,8 @@ mod tests {
     async fn concurrent_set_get_responds_for_each_request() {
         let handler = test_handler();
         let (plugin_side, kernel_side) = UnixStream::pair().unwrap();
-        let client = VeyronClient::from_stream(plugin_side, None);
-        let mut kernel = VeyronClient::from_stream(kernel_side, None);
+        let client = VynkorClient::from_stream(plugin_side, None);
+        let mut kernel = VynkorClient::from_stream(kernel_side, None);
 
         let loop_task = tokio::spawn(run_concurrent_loop(client, handler));
 
@@ -123,8 +123,8 @@ mod tests {
     async fn error_becomes_action_error_envelope() {
         let handler = test_handler();
         let (plugin_side, kernel_side) = UnixStream::pair().unwrap();
-        let client = VeyronClient::from_stream(plugin_side, None);
-        let mut kernel = VeyronClient::from_stream(kernel_side, None);
+        let client = VynkorClient::from_stream(plugin_side, None);
+        let mut kernel = VynkorClient::from_stream(kernel_side, None);
 
         let loop_task = tokio::spawn(run_concurrent_loop(client, handler));
 

@@ -9,7 +9,7 @@
 //! The resolved key value is never logged and never embedded in an error
 //! string — only the handle (name) appears in diagnostics.
 
-use veyron_sdk::VeyronClient;
+use vynkor_sdk::VynkorClient;
 
 /// `secret_get`'s response shape (see `plugins/secrets/src/handler.rs`):
 /// `{"found":true,"value":"..."}` or `{"found":false}`.
@@ -34,14 +34,14 @@ const SECRETS_TIMEOUT_MS: u32 = 3000;
 /// found, empty value, `send_action` error) logs to stderr with the
 /// `[stt]` prefix and falls through to the env var. `Err` only when both
 /// sources miss.
-pub async fn resolve_api_key(client: &mut VeyronClient, handle: &str) -> Result<String, String> {
+pub async fn resolve_api_key(client: &mut VynkorClient, handle: &str) -> Result<String, String> {
     let params = serde_json::json!({ "name": handle }).to_string().into_bytes();
     match client
         .send_action("secret_get", &params, SECRETS_TIMEOUT_MS)
         .await
     {
         Ok(resp) => {
-            if resp.status == veyron_sdk::proto::ActionStatus::ActionOk as i32 {
+            if resp.status == vynkor_sdk::proto::ActionStatus::ActionOk as i32 {
                 match serde_json::from_slice::<SecretGetResponse>(&resp.data_json) {
                     Ok(secret) if secret.found && !secret.value.is_empty() => {
                         return Ok(secret.value);

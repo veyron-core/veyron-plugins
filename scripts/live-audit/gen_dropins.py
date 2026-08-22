@@ -83,8 +83,8 @@ for slug, (binrel, envs) in PLUGINS_ENV.items():
     slug_id = man["plugin_id"]  # the id the binary registers with — token sub must match it
     token = mint(slug_id, man.get("permissions", []), man.get("ipc_targets", []))
     envs = list(envs) + [
-        "VEYRON_JWT_SECRET=" + JWT_SECRET,
-        "VEYRON_JWT_TOKEN=" + token,
+        "VYN_JWT_SECRET=" + JWT_SECRET,
+        "VYN_JWT_TOKEN=" + token,
     ]
     env_block = ""
     if envs:

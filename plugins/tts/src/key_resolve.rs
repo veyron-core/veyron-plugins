@@ -10,7 +10,7 @@
 //! The vault wins when both hold a value. The resolved key value is never
 //! logged and never embedded in an error string — only the handle name is.
 
-use veyron_sdk::VeyronClient;
+use vynkor_sdk::VynkorClient;
 
 /// Reply shape of `secrets`'s `secret_get` action
 /// (`{"found":true,"value":"..."}` / `{"found":false}`).
@@ -32,7 +32,7 @@ const SECRETS_TIMEOUT_MS: u32 = 3000;
 /// malformed reply, not found, empty value, or a `send_action` error — is
 /// logged to stderr (value never included) and the env fallback is tried.
 /// `Err` only when both sources miss.
-pub async fn resolve_api_key(client: &mut VeyronClient, handle: &str) -> Result<String, String> {
+pub async fn resolve_api_key(client: &mut VynkorClient, handle: &str) -> Result<String, String> {
     match client
         .send_action(
             "secret_get",
@@ -42,7 +42,7 @@ pub async fn resolve_api_key(client: &mut VeyronClient, handle: &str) -> Result<
         .await
     {
         Ok(resp) => {
-            if resp.status == veyron_sdk::proto::ActionStatus::ActionOk as i32 {
+            if resp.status == vynkor_sdk::proto::ActionStatus::ActionOk as i32 {
                 match serde_json::from_slice::<SecretGetResponse>(&resp.data_json) {
                     Ok(secret) if secret.found && !secret.value.is_empty() => {
                         return Ok(secret.value);

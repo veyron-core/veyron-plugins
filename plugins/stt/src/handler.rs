@@ -7,7 +7,7 @@
 //!     `network`'s `http_request` action, parse the transcript — same flow
 //!     as `ai`'s `chat_completion` and `tts`'s cloud handlers.
 
-use veyron_sdk::VeyronClient;
+use vynkor_sdk::VynkorClient;
 
 use crate::provider::{openai::OpenAiProvider, ModelInfo, Provider, TranscriptResult};
 use crate::request::{self, Provider as ProviderKind, TranscribeParams};
@@ -26,7 +26,7 @@ struct NetworkHttpResponse {
 /// place in `ActionResponse.data_json` on success, or a human-readable
 /// error (never containing a resolved API key) on failure.
 pub async fn handle_stt_transcribe(
-    client: &mut VeyronClient,
+    client: &mut VynkorClient,
     params_json: &[u8],
 ) -> Result<Vec<u8>, String> {
     let params = request::parse_request(params_json)?;
@@ -41,7 +41,7 @@ pub async fn handle_stt_transcribe(
 
 /// Handle one `stt_models` action: list the models the provider exposes.
 pub async fn handle_stt_models(
-    _client: &mut VeyronClient,
+    _client: &mut VynkorClient,
     params_json: &[u8],
 ) -> Result<Vec<u8>, String> {
     let provider = request::parse_models_request(params_json)?;
@@ -59,7 +59,7 @@ pub async fn handle_stt_models(
 }
 
 async fn transcribe_cloud(
-    client: &mut VeyronClient,
+    client: &mut VynkorClient,
     params: &TranscribeParams,
 ) -> Result<TranscriptResult, String> {
     let allowed = request::parse_allowed_key_envs(
@@ -86,7 +86,7 @@ async fn transcribe_cloud(
         .await
         .map_err(|e| format!("network plugin call failed: {e}"))?;
 
-    if action_resp.status != veyron_sdk::proto::ActionStatus::ActionOk as i32 {
+    if action_resp.status != vynkor_sdk::proto::ActionStatus::ActionOk as i32 {
         return Err(format!("network plugin error: {}", action_resp.error));
     }
 
@@ -131,7 +131,7 @@ pub const TEXT_EVENT_TYPE: &str = "stt_text";
 /// inbound PCM audio stream. The mic-side peer then sends `AudioStreamChunk`
 /// envelopes (codec `PCM_S16LE`) addressed to `stt`.
 pub async fn handle_stt_listen_start(
-    _client: &mut VeyronClient,
+    _client: &mut VynkorClient,
     params_json: &[u8],
 ) -> Result<Vec<u8>, String> {
     let params = request::parse_listen_start_request(params_json)?;
@@ -153,7 +153,7 @@ pub async fn handle_stt_listen_start(
 /// the stream (local sherpa only), publish the transcript as an
 /// `stt_text` event, and return it in the action response.
 pub async fn handle_stt_listen_stop(
-    client: &mut VeyronClient,
+    client: &mut VynkorClient,
     params_json: &[u8],
 ) -> Result<Vec<u8>, String> {
     let params = request::parse_listen_stop_request(params_json)?;

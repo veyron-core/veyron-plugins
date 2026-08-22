@@ -2,17 +2,17 @@
 //! through `network`'s `http_request` action rather than opening its own
 //! sockets (see ROADMAP.md, "Decision: reuse `network`, don't reinvent").
 //!
-//! v0.3 adds a SQLite store (`VEYRON_DATA_DIR/ai.db`) holding declared +
+//! v0.3 adds a SQLite store (`VYN_DATA_DIR/ai.db`) holding declared +
 //! auto-discovered models, agent profiles, and per-call token usage.
 //!
 //! Doesn't use the SDK's `Plugin::run`/`serve` loop: `Plugin::on_message`
-//! only gets `&mut self`, not `&mut VeyronClient`, and there is no way to
+//! only gets `&mut self`, not `&mut VynkorClient`, and there is no way to
 //! get a second client for the outbound `send_action` call into `network`
 //! — the kernel rejects a second connection under the same `plugin_id`
-//! (`veyron/src/plugins/registry.rs`) and rejects any traffic from an
-//! unregistered connection (`veyron/src/ipc/protocol.rs`). So this plugin
+//! (`vynkor/src/plugins/registry.rs`) and rejects any traffic from an
+//! unregistered connection (`vynkor/src/ipc/protocol.rs`). So this plugin
 //! drives its own loop, near-identical to the SDK's `serve()`, but calls
-//! the `chat_completion` handler with the loop's own `&mut VeyronClient` in
+//! the `chat_completion` handler with the loop's own `&mut VynkorClient` in
 //! hand. Sequential, one request at a time — same model `network` and
 //! `ping-pong-rs` already use.
 
@@ -20,8 +20,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ai_plugin::{config, db, discovery, handler};
-use veyron_sdk::proto::{envelope, ActionResponse, ActionStatus, Envelope, PluginManifest, Pong};
-use veyron_sdk::{VeyronClient, VeyronError};
+use vynkor_sdk::proto::{envelope, ActionResponse, ActionStatus, Envelope, PluginManifest, Pong};
+use vynkor_sdk::{VynkorClient, VynkorError};
 
 const PLUGIN_ID: &str = "ai";
 const PLUGIN_VERSION: &str = "0.3.0";
@@ -57,8 +57,8 @@ fn unix_millis() -> u64 {
 }
 
 async fn handle_action_request(
-    client: &mut VeyronClient,
-    req: veyron_sdk::proto::ActionRequest,
+    client: &mut VynkorClient,
+    req: vynkor_sdk::proto::ActionRequest,
     db: &db::AiDb,
     cfg: &config::AiConfig,
 ) -> Envelope {
@@ -101,16 +101,16 @@ async fn handle_action_request(
 }
 
 async fn serve(
-    mut client: VeyronClient,
+    mut client: VynkorClient,
     db: Arc<db::AiDb>,
     cfg: config::AiConfig,
-) -> Result<(), VeyronError> {
-    let jwt_token = std::env::var("VEYRON_JWT_TOKEN").unwrap_or_default();
+) -> Result<(), VynkorError> {
+    let jwt_token = std::env::var("VYN_JWT_TOKEN").unwrap_or_default();
     let ack = client
         .register_full(PLUGIN_ID, PLUGIN_VERSION, manifest(), &jwt_token)
         .await?;
     if !ack.accepted {
-        return Err(VeyronError::PermissionDenied(format!(
+        return Err(VynkorError::PermissionDenied(format!(
             "registration rejected: {}",
             ack.reject_reason
         )));
@@ -202,18 +202,18 @@ async fn serve(
 }
 
 #[tokio::main]
-async fn main() -> Result<(), VeyronError> {
-    let socket_path = std::env::var("VEYRON_SOCKET_PATH")
-        .unwrap_or_else(|_| veyron_wire::socket::default_socket_path());
-    let secret = std::env::var("VEYRON_JWT_SECRET")
+async fn main() -> Result<(), VynkorError> {
+    let socket_path = std::env::var("VYN_SOCKET_PATH")
+        .unwrap_or_else(|_| vynkor_wire::socket::default_socket_path());
+    let secret = std::env::var("VYN_JWT_SECRET")
         .ok()
         .filter(|s| !s.is_empty());
     let client = match secret {
-        Some(s) => VeyronClient::connect_with_secret(&socket_path, s.as_bytes()).await?,
-        None => VeyronClient::connect(&socket_path).await?,
+        Some(s) => VynkorClient::connect_with_secret(&socket_path, s.as_bytes()).await?,
+        None => VynkorClient::connect(&socket_path).await?,
     };
 
-    let data_dir = std::env::var_os("VEYRON_DATA_DIR").map(PathBuf::from);
+    let data_dir = std::env::var_os("VYN_DATA_DIR").map(PathBuf::from);
     let db = match db::AiDb::open(data_dir.as_deref()) {
         Ok(db) => Arc::new(db),
         Err(e) => {

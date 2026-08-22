@@ -14,8 +14,8 @@ use std::os::unix::fs::PermissionsExt;
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
-use veyron_sdk::proto::ActionStatus;
-use veyron_sdk::VeyronClient;
+use vynkor_sdk::proto::ActionStatus;
+use vynkor_sdk::VynkorClient;
 
 use crate::request::NotifyParams;
 
@@ -26,7 +26,7 @@ pub const ENABLED_PROVIDERS_ENV: &str = "NOTIFY_PLUGIN_ENABLED_PROVIDERS";
 pub const APP_NAME_ENV: &str = "NOTIFY_PLUGIN_APP_NAME";
 /// Fallback notify-send app name when neither the request nor the env var
 /// sets one.
-pub const DEFAULT_APP_NAME: &str = "veyron";
+pub const DEFAULT_APP_NAME: &str = "vynkor";
 
 /// Operator env var: tts provider for `speak: true` озвучка.
 pub const TTS_PROVIDER_ENV: &str = "NOTIFY_PLUGIN_TTS_PROVIDER";
@@ -434,7 +434,7 @@ fn pick_player(format: &str) -> Result<String, String> {
 /// base64-decode the returned audio, write it to a temp file, play it with
 /// the resolved player, and remove the temp file (best-effort cleanup runs
 /// on every path, including player failure).
-pub async fn speak_via_tts(client: &mut VeyronClient, text: &str) -> Result<(), String> {
+pub async fn speak_via_tts(client: &mut VynkorClient, text: &str) -> Result<(), String> {
     let provider =
         std::env::var(TTS_PROVIDER_ENV).unwrap_or_else(|_| DEFAULT_TTS_PROVIDER.to_string());
     let voice = std::env::var(TTS_VOICE_ENV).ok().filter(|s| !s.trim().is_empty());
@@ -528,7 +528,7 @@ mod tests {
     #[test]
     fn notify_send_args_minimal_request() {
         let args = notify_send_args_with(&n("hello"), None);
-        assert_eq!(args, vec!["-a", "veyron", "hello"]);
+        assert_eq!(args, vec!["-a", "vynkor", "hello"]);
     }
 
     #[test]
@@ -539,7 +539,7 @@ mod tests {
         let args = notify_send_args_with(&p, None);
         assert_eq!(
             args,
-            vec!["-a", "veyron", "-u", "critical", "-t", "5000", "hello"]
+            vec!["-a", "vynkor", "-u", "critical", "-t", "5000", "hello"]
         );
     }
 
@@ -548,14 +548,14 @@ mod tests {
         let mut p = n("hello");
         p.title = "Build done".to_string();
         let args = notify_send_args_with(&p, None);
-        assert_eq!(args, vec!["-a", "veyron", "Build done", "hello"]);
+        assert_eq!(args, vec!["-a", "vynkor", "Build done", "hello"]);
     }
 
     #[test]
     fn notify_send_args_omits_empty_title() {
         let p = n("hello"); // title defaults to ""
         let args = notify_send_args_with(&p, None);
-        assert_eq!(args, vec!["-a", "veyron", "hello"]);
+        assert_eq!(args, vec!["-a", "vynkor", "hello"]);
     }
 
     #[test]
@@ -563,7 +563,7 @@ mod tests {
         let mut p = n("hello");
         p.timeout_ms = Some(0);
         let args = notify_send_args_with(&p, None);
-        assert_eq!(args, vec!["-a", "veyron", "hello"]);
+        assert_eq!(args, vec!["-a", "vynkor", "hello"]);
     }
 
     #[test]

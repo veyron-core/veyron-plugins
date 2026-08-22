@@ -7,8 +7,8 @@
 //!     send it through `network`'s `http_request` action, parse the audio
 //!     body — same flow as `ai`'s `chat_completion` handler.
 
-use veyron_sdk::proto::{AudioCodec, AudioStreamChunk};
-use veyron_sdk::VeyronClient;
+use vynkor_sdk::proto::{AudioCodec, AudioStreamChunk};
+use vynkor_sdk::VynkorClient;
 
 use crate::provider::{
     elevenlabs::ElevenLabsProvider, openai::OpenAiProvider, opus, AudioResult, Provider, VoiceInfo,
@@ -31,7 +31,7 @@ struct NetworkHttpResponse {
 /// place in `ActionResponse.data_json` on success, or a human-readable
 /// error (never containing a resolved API key) on failure.
 pub async fn handle_tts_synthesize(
-    client: &mut VeyronClient,
+    client: &mut VynkorClient,
     params_json: &[u8],
 ) -> Result<Vec<u8>, String> {
     let params = request::parse_request(params_json)?;
@@ -48,7 +48,7 @@ pub async fn handle_tts_synthesize(
 
 /// Handle one `tts_voices` action: list the voices the provider exposes.
 pub async fn handle_tts_voices(
-    _client: &mut VeyronClient,
+    _client: &mut VynkorClient,
     params_json: &[u8],
 ) -> Result<Vec<u8>, String> {
     let provider = request::parse_voices_request(params_json)?;
@@ -73,7 +73,7 @@ pub async fn handle_tts_voices(
 }
 
 async fn synthesize_cloud(
-    client: &mut VeyronClient,
+    client: &mut VynkorClient,
     params: &SynthesizeParams,
 ) -> Result<AudioResult, String> {
     let allowed = request::parse_allowed_key_envs(
@@ -105,7 +105,7 @@ async fn synthesize_cloud(
         .await
         .map_err(|e| format!("network plugin call failed: {e}"))?;
 
-    if action_resp.status != veyron_sdk::proto::ActionStatus::ActionOk as i32 {
+    if action_resp.status != vynkor_sdk::proto::ActionStatus::ActionOk as i32 {
         return Err(format!("network plugin error: {}", action_resp.error));
     }
 
@@ -155,7 +155,7 @@ pub fn parse_cloud_body(
 /// kernel routes each `AudioStreamChunk` envelope to `target` like any
 /// other message; delivery failure is the caller's to detect (no ack).
 pub async fn handle_tts_speak(
-    client: &mut VeyronClient,
+    client: &mut VynkorClient,
     params_json: &[u8],
 ) -> Result<Vec<u8>, String> {
     let params = request::parse_speak_request(params_json)?;

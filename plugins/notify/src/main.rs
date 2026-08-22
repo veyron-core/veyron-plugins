@@ -8,21 +8,21 @@
 //! tts озвучка (`speak: true`, routed through the `tts` plugin).
 //!
 //! Doesn't use the SDK's `Plugin::run`/`serve` loop: `Plugin::on_message`
-//! only gets `&mut self`, not `&mut VeyronClient`, and there is no way to
+//! only gets `&mut self`, not `&mut VynkorClient`, and there is no way to
 //! get a second client for the outbound `send_action` call into `tts` —
 //! the kernel rejects a second connection under the same `plugin_id`
-//! (`veyron/src/plugins/registry.rs`) and rejects any traffic from an
-//! unregistered connection (`veyron/src/ipc/protocol.rs`). So this plugin
+//! (`vynkor/src/plugins/registry.rs`) and rejects any traffic from an
+//! unregistered connection (`vynkor/src/ipc/protocol.rs`). So this plugin
 //! drives its own loop, near-identical to the SDK's `serve()`, but calls
-//! the `notify_send` handler with the loop's own `&mut VeyronClient` in
+//! the `notify_send` handler with the loop's own `&mut VynkorClient` in
 //! hand (same rationale and structure as the `ai` plugin). Sequential, one
 //! request at a time — same model `ping-pong-rs` and `ai` use.
 
 use notify_plugin::handler;
-use veyron_sdk::proto::{
+use vynkor_sdk::proto::{
     envelope, ActionRequest, ActionResponse, ActionStatus, Envelope, PluginManifest, Pong,
 };
-use veyron_sdk::{VeyronClient, VeyronError};
+use vynkor_sdk::{VynkorClient, VynkorError};
 
 const PLUGIN_ID: &str = "notify";
 const PLUGIN_VERSION: &str = "0.2.0";
@@ -48,7 +48,7 @@ fn unix_millis() -> u64 {
         .unwrap_or(0)
 }
 
-async fn handle_action_request(client: &mut VeyronClient, req: ActionRequest) -> Envelope {
+async fn handle_action_request(client: &mut VynkorClient, req: ActionRequest) -> Envelope {
     let outcome = match req.action.as_str() {
         "notify_send" => handler::handle_notify_send(client, &req.params_json).await,
         "notify_providers" => handler::handle_notify_providers(),
@@ -87,13 +87,13 @@ async fn handle_action_request(client: &mut VeyronClient, req: ActionRequest) ->
     }
 }
 
-async fn serve(mut client: VeyronClient) -> Result<(), VeyronError> {
-    let jwt_token = std::env::var("VEYRON_JWT_TOKEN").unwrap_or_default();
+async fn serve(mut client: VynkorClient) -> Result<(), VynkorError> {
+    let jwt_token = std::env::var("VYN_JWT_TOKEN").unwrap_or_default();
     let ack = client
         .register_full(PLUGIN_ID, PLUGIN_VERSION, manifest(), &jwt_token)
         .await?;
     if !ack.accepted {
-        return Err(VeyronError::PermissionDenied(format!(
+        return Err(VynkorError::PermissionDenied(format!(
             "registration rejected: {}",
             ack.reject_reason
         )));
@@ -137,15 +137,15 @@ async fn serve(mut client: VeyronClient) -> Result<(), VeyronError> {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), VeyronError> {
-    let socket_path = std::env::var("VEYRON_SOCKET_PATH")
-        .unwrap_or_else(|_| veyron_wire::socket::default_socket_path());
-    let secret = std::env::var("VEYRON_JWT_SECRET")
+async fn main() -> Result<(), VynkorError> {
+    let socket_path = std::env::var("VYN_SOCKET_PATH")
+        .unwrap_or_else(|_| vynkor_wire::socket::default_socket_path());
+    let secret = std::env::var("VYN_JWT_SECRET")
         .ok()
         .filter(|s| !s.is_empty());
     let client = match secret {
-        Some(s) => VeyronClient::connect_with_secret(&socket_path, s.as_bytes()).await?,
-        None => VeyronClient::connect(&socket_path).await?,
+        Some(s) => VynkorClient::connect_with_secret(&socket_path, s.as_bytes()).await?,
+        None => VynkorClient::connect(&socket_path).await?,
     };
 
     serve(client).await

@@ -3,7 +3,7 @@
 //! `PERMISSION_EVENT_PUBLISH`). See README.md.
 //!
 //! Serve-loop architecture (calendar/sync-client model): the loop task
-//! exclusively owns the `VeyronClient` and is the single reader of the
+//! exclusively owns the `VynkorClient` and is the single reader of the
 //! connection, so no inbound frame is ever discarded. Action handlers and
 //! the periodic scan run as spawned tasks that reach `database` and
 //! fired-action targets through the [`Rpc`] proxy channel; replies and
@@ -22,11 +22,11 @@ use std::sync::Arc;
 use scheduler_plugin::{handle_action, scan_due, store, Config, Rpc, RpcCall};
 use serde_json::Value;
 use tokio::sync::{mpsc, oneshot};
-use veyron_sdk::proto::{
+use vynkor_sdk::proto::{
     envelope, ActionRequest, ActionResponse, ActionStatus, Envelope, EventPublish, PluginManifest,
     Pong,
 };
-use veyron_sdk::{VeyronClient, VeyronError};
+use vynkor_sdk::{VynkorClient, VynkorError};
 
 const PLUGIN_ID: &str = "scheduler";
 const PLUGIN_VERSION: &str = "0.1.0";
@@ -82,13 +82,13 @@ fn event_envelope(event_type: &str, payload: &Value) -> Envelope {
     }
 }
 
-async fn serve(mut client: VeyronClient, config: Config) -> Result<(), VeyronError> {
-    let jwt_token = std::env::var("VEYRON_JWT_TOKEN").unwrap_or_default();
+async fn serve(mut client: VynkorClient, config: Config) -> Result<(), VynkorError> {
+    let jwt_token = std::env::var("VYN_JWT_TOKEN").unwrap_or_default();
     let ack = client
         .register_full(PLUGIN_ID, PLUGIN_VERSION, manifest(), &jwt_token)
         .await?;
     if !ack.accepted {
-        return Err(VeyronError::PermissionDenied(format!(
+        return Err(VynkorError::PermissionDenied(format!(
             "registration rejected: {}",
             ack.reject_reason
         )));
@@ -245,9 +245,9 @@ async fn serve(mut client: VeyronClient, config: Config) -> Result<(), VeyronErr
 }
 
 #[tokio::main]
-async fn main() -> Result<(), VeyronError> {
+async fn main() -> Result<(), VynkorError> {
     let config = Config::from_env();
-    let client = VeyronClient::connect_from_env().await?;
+    let client = VynkorClient::connect_from_env().await?;
     serve(client, config).await
 }
 
@@ -258,7 +258,7 @@ mod tests {
     use std::time::Duration;
     use tokio::net::UnixStream;
     use tokio::sync::Mutex;
-    use veyron_sdk::proto::{
+    use vynkor_sdk::proto::{
         ActionResponse as ProtoActionResponse, EventPublishAck, EventPublishStatus,
         PluginRegisterAck,
     };
@@ -378,8 +378,8 @@ mod tests {
     /// records every non-db action call, and fails exactly `fail_please`.
     async fn start_plugin(config: Config) -> Shim {
         let (plugin_side, kernel_side) = UnixStream::pair().unwrap();
-        let plugin_client = VeyronClient::from_stream(plugin_side, None);
-        let kernel_client = VeyronClient::from_stream(kernel_side, None);
+        let plugin_client = VynkorClient::from_stream(plugin_side, None);
+        let kernel_client = VynkorClient::from_stream(kernel_side, None);
         tokio::spawn(async move {
             let _ = serve(plugin_client, config).await;
         });
@@ -401,7 +401,7 @@ mod tests {
     }
 
     async fn run_shim(
-        mut kernel: VeyronClient,
+        mut kernel: VynkorClient,
         mut rx: mpsc::Receiver<Cmd>,
         published: Published,
         dispatched: Dispatched,

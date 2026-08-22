@@ -26,9 +26,9 @@
 use std::path::PathBuf;
 
 use gated_write_plugin::handler;
-use veyron_sdk::confirmation_gate::ConfirmationGate;
-use veyron_sdk::proto::{envelope, ActionRisk, Envelope, PluginManifest};
-use veyron_sdk::{Plugin, VeyronError};
+use vynkor_sdk::confirmation_gate::ConfirmationGate;
+use vynkor_sdk::proto::{envelope, ActionRisk, Envelope, PluginManifest};
+use vynkor_sdk::{Plugin, VynkorError};
 
 const DATA_DIR_ENV: &str = "GATED_WRITE_DATA_DIR";
 const CONFIRM_CALLERS_ENV: &str = "GATED_WRITE_CONFIRM_CALLERS";
@@ -112,7 +112,7 @@ impl Plugin for GatedWritePlugin {
         }
     }
 
-    async fn on_message(&mut self, env: Envelope) -> Result<Option<Envelope>, VeyronError> {
+    async fn on_message(&mut self, env: Envelope) -> Result<Option<Envelope>, VynkorError> {
         match env.payload {
             Some(envelope::Payload::ActionRequest(req)) => {
                 // The executor runs with the params stored at request time —
@@ -136,7 +136,7 @@ impl Plugin for GatedWritePlugin {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), VeyronError> {
+async fn main() -> Result<(), VynkorError> {
     let mut plugin = GatedWritePlugin::new();
     plugin.run().await?;
     println!("[gated-write] shutting down");
@@ -146,7 +146,7 @@ async fn main() -> Result<(), VeyronError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use veyron_sdk::proto::{ActionRequest, ActionResponse, ActionStatus};
+    use vynkor_sdk::proto::{ActionRequest, ActionResponse, ActionStatus};
 
     fn temp_data_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use sync_client_plugin::{serve_cycle, SyncClientHandler};
-use veyron_sdk::{VeyronClient, VeyronError};
+use vynkor_sdk::{VynkorClient, VynkorError};
 
 struct Config {
     heartbeat_secs: u64,
@@ -34,7 +34,7 @@ fn load_config() -> Config {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), VeyronError> {
+async fn main() -> Result<(), VynkorError> {
     let config = load_config();
     let handler = Arc::new(SyncClientHandler::new(
         config.device_id,
@@ -43,9 +43,9 @@ async fn main() -> Result<(), VeyronError> {
 
     let mut backoff = Duration::from_secs(1);
     loop {
-        match VeyronClient::connect_from_env().await {
+        match VynkorClient::connect_from_env().await {
             Ok(client) => {
-                let token = std::env::var("VEYRON_JWT_TOKEN").unwrap_or_default();
+                let token = std::env::var("VYN_JWT_TOKEN").unwrap_or_default();
                 if let Err(e) =
                     serve_cycle(client, &token, handler.clone(), config.heartbeat_secs).await
                 {

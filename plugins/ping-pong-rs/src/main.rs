@@ -1,6 +1,6 @@
-use veyron_sdk::proto::{envelope, ActionResponse, ActionStatus, Envelope, PluginManifest};
-use veyron_sdk::VeyronError;
-use veyron_sdk::{Plugin, VeyronClient};
+use vynkor_sdk::proto::{envelope, ActionResponse, ActionStatus, Envelope, PluginManifest};
+use vynkor_sdk::VynkorError;
+use vynkor_sdk::{Plugin, VynkorClient};
 
 /// Minimal reference plugin: replies "pong" to a "ping" action, rejects anything else.
 struct PingPongPlugin;
@@ -21,11 +21,11 @@ impl Plugin for PingPongPlugin {
         "0.2.0"
     }
 
-    async fn on_init(&mut self, _client: &mut VeyronClient) -> Result<(), VeyronError> {
+    async fn on_init(&mut self, _client: &mut VynkorClient) -> Result<(), VynkorError> {
         Ok(())
     }
 
-    async fn on_message(&mut self, envelope: Envelope) -> Result<Option<Envelope>, VeyronError> {
+    async fn on_message(&mut self, envelope: Envelope) -> Result<Option<Envelope>, VynkorError> {
         match envelope.payload {
             Some(envelope::Payload::ActionRequest(req)) if req.action == "ping" => {
                 let response = Envelope {
@@ -55,12 +55,12 @@ impl Plugin for PingPongPlugin {
         }
     }
 
-    async fn on_shutdown(&mut self) -> Result<(), VeyronError> {
+    async fn on_shutdown(&mut self) -> Result<(), VynkorError> {
         Ok(())
     }
 }
 
 #[tokio::main]
-async fn main() -> Result<(), VeyronError> {
+async fn main() -> Result<(), VynkorError> {
     PingPongPlugin.run().await
 }
