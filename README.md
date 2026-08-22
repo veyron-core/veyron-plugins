@@ -37,7 +37,9 @@ even when prose says vynkor.
 
 Writing a new plugin? Start with [`docs/PLUGIN_AUTHORING.md`](docs/PLUGIN_AUTHORING.md) —
 the single-reader loop / RPC-proxy pattern, kernel routing facts (T-19/T-04),
-and the fake-kernel test harness.
+and the fake-kernel test harness. For how all shipped plugins behave on a
+real secured kernel (2026-08-22 audit: results, resource profile, open
+defects), see [`docs/LIVE_KERNEL_AUDIT_2026-08-22.md`](docs/LIVE_KERNEL_AUDIT_2026-08-22.md).
 
 ## Registry
 

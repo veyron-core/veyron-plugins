@@ -17,6 +17,21 @@ Text-only system clipboard access via host binaries — one blessed path for
   compositor needed in CI.
 - Declares `PERMISSION_CLIPBOARD` (proto v1.4, value 16).
 
+## Known bugs (live-kernel audit 2026-08-22)
+
+- **`clipboard_write` takes 35–60+ s** on Wayland while `clipboard_read`
+  is 3–22 ms and the same `wl-copy` binary answers instantly from a
+  shell. Found in the first full live-kernel audit
+  (`docs/LIVE_KERNEL_AUDIT_2026-08-22.md`, defect #1); latency varies
+  between runs, so the wait is not a fixed timeout. Working hypothesis:
+  `wl-copy` daemonizes to keep serving the selection, and our spawn/wait
+  path waits on something the daemonized child keeps alive (fd or pipe),
+  only unwinding when some outer timeout trips. Fix direction: spawn
+  `wl-copy` with stdin from the payload and detach its stdio
+  (`Stdio::null()`/`make_contiguous` equivalent) so no inherited pipe pins
+  the wait; verify against `wl-copy --foreground` semantics; add a
+  regression test with a fake runner that emulates a daemonizing child.
+
 ## Later (unscheduled)
 
 - `clipboard_clear` — only once a reliable cross-backend story exists

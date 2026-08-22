@@ -117,6 +117,23 @@ validation, allowlist, WAV encode/decode round-trips, Kokoro sid
 resolution, piper sid rules, cloud request building and fixture-response
 parsing. sherpa config assembly tested without loading a real model.
 
+## Known bugs (live-kernel audit 2026-08-22)
+
+- **Local `sherpa` actions hang indefinitely before the model loads.**
+  First full live-kernel audit (`docs/LIVE_KERNEL_AUDIT_2026-08-22.md`,
+  defect #2): `tts_voices`/`tts_synthesize` with provider `sherpa`
+  (piper ru medium on disk, path + type set via env) never respond —
+  plugin process sleeps with 0% CPU and RSS flat at ~22 MB, i.e. sherpa
+  init never starts. Kernel deadline fires `ACTION_TIMEOUT` ~200 s later.
+  100% repro in that environment; earlier manual Kokoro E2E (see README
+  "Testing") did work, so this is either a regression since then or an
+  environment-specific blocker (e.g. something in the supervised process
+  env sherpa-onnx init waits on). Fix direction: reproduce outside the
+  kernel by invoking the handler directly with identical env; if it only
+  hangs supervised, diff the supervisor env/spawn shape vs a bare run;
+  add an integration test that runs one real synthesize against a model
+  file so this can't silently rot again.
+
 ## Near-term (buildable now, no kernel changes)
 
 - **Google Cloud TTS + Azure adapters** — same `Provider` trait, one file

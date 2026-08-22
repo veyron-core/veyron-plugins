@@ -141,3 +141,43 @@ choosing values that work for all tests simultaneously (one fixed allowlist
 covering both providers' key names; a decoy env value to prove vault-wins;
 an unlisted name for the rejection case). No locks, no cleanup, no races —
 and the vault-vs-env precedence gets tested for free.
+
+## 7. Running against a live secured kernel
+
+Lessons from the first full audit (`LIVE_KERNEL_AUDIT_2026-08-22.md`,
+harness snapshot in `scripts/live-audit/`). The fake kernel (§3) proves
+handler logic; these are the things that only bite on a real secured one.
+
+- **The supervisor injects nothing auth-related.** A plugin under a
+  kernel with `jwt_secret` needs both `VEYRON_JWT_SECRET` (frame-MAC key
+  derivation) and `VEYRON_JWT_TOKEN`, added by the operator to the
+  drop-in's `env:` list. The token's `sub` must equal the registering
+  `plugin_id`, and its claims **override** the manifest — mint per plugin
+  with that plugin's declared permissions. Missing either → registration
+  rejected → exit → silent restart loop until `max_restarts` runs out,
+  with an empty log ring buffer and nothing at WARN kernel-side. When a
+  plugin "won't start", check this before anything else; run the binary
+  manually with the drop-in env plus `VEYRON_SOCKET_PATH` to see the real
+  error on stderr.
+- **Action requests go to frame target `kernel`.** The kernel only does
+  pending-action bookkeeping (internal `kact-*` correlation, response
+  proxying, T-19 caller checks) for envelopes targeted at `kernel`.
+  Targeting a plugin slug directly takes the zero-parse forward path:
+  your request arrives verbatim, the reply carries *your* original
+  `action_id`, matches no pending entry, and is silently dropped.
+- **Wire types are strict**: `params_json`/`data_json` are protobuf
+  `bytes` (serialize the JSON), and responses may arrive
+  zstd-compressed (payloads ≥ 64 KiB, `FLAG_COMPRESSED`) or MAC-tagged —
+  handle both when writing a client by hand (see `scripts/live-audit/
+  veyron_ws.py`).
+- **`ipc_targets` is exact-match** — no wildcard. List every slug you
+  will call.
+- **The HTTP API is TLS-only by default**; plain-HTTP probes fail with a
+  confusing non-HTTP reply. Use `https://` (and `wss://` on the socket)
+  against a dev cert.
+- **Plugin env inheritance is a real debugging surface**: desktop-facing
+  plugins (clipboard/notify/media/system) depend on
+  `WAYLAND_DISPLAY`/`DBUS_SESSION_BUS_ADDRESS` being present in the
+  *kernel's* environment at spawn time — start the kernel from a session
+  shell, not a stripped service context, or provider detection degrades
+  in ways that look like plugin bugs.
