@@ -461,12 +461,19 @@ generated `PermissionType`. A protocol/permission change is therefore already
 
 ### 5. Signing
 
-Trust model unchanged (T-11): Ed25519 over `{slug}:{version}:{sha256}`,
-verified against the pinned `MAINTAINER_PUBLIC_KEY_HEX` (or the
-`marketplace_public_key` override for private/community registries). The
-maintainer signs locally with a personal offline key; `scripts/package.sh`
-gains a sign step (key from env/file, never committed). Host migration never
-touches keys — only `registry_url`.
+Trust model (T-11): Ed25519 over the **S1 canonical message**
+`{slug}:{version}:{sha256}:{status}:{archive_url}:{min_kernel_version}:{max_kernel_version}`
+— the whole delivery surface is bound, so a compromised serving channel can't
+flip `revoked → stable`, redirect `archive_url` to an arbitrary host, or
+loosen the compat bounds without breaking the signature. Verified against the
+pinned maintainer public key (`official_source()` in vynkor-manager; formerly
+the kernel's `MAINTAINER_PUBLIC_KEY_HEX` — same key, moved with the
+extraction). The canonical form lives in
+`vynkor-manager/src/registry.rs::signed_message`.
+
+⚠️ **Historical note:** `scripts/package.sh` shipped signing the *pre-S1*
+three-field form `{slug}:{version}:{sha256}` — see Sequencing **#4** for the
+mismatch this caused and the fix.
 
 ### Sequencing
 
@@ -491,6 +498,54 @@ touches keys — only `registry_url`.
    enforces `files` extraction allowlist, and the anti-laundering check is
    data-driven from per-action `permission`). Veyron Web consuming
    `input`/`output`/`config_schema` for form generation is still open.
+4. **S1 re-signing — every published signature verifies against nothing
+   (P0, installs broken).** Found 2026-08-22 while smoke-testing `vynm
+   install` against this live registry: `database@0.1.0` fails Ed25519
+   verification (`exit 3`, fail-closed) — and the pre-extraction kernel
+   failed identically, so this predates vynm.
+
+   **Root cause:** `scripts/package.sh` signs the *pre-S1* three-field
+   message `{slug}:{version}:{sha256}` (signing block ~L210, dist-layout
+   comment ~L17), while the verifier checks the **S1 seven-field** message
+   `{slug}:{version}:{sha256}:{status}:{archive_url}:{min_kernel_version}:
+   {max_kernel_version}` — canonical form defined by
+   `signed_message()` in `vynkor-manager/src/registry.rs` (single source of
+   truth since the marketplace extraction; formerly kernel
+   `marketplace/registry.rs`, deleted in veyron PR #43; S1 landed earlier
+   with `REGISTRY_CACHE_SCHEMA_VERSION` bump to 2). Cryptographically
+   verified 2026-08-22: the pinned key
+   `ed8c39a19dcbfed1a3a436b914a8ce9bf2b449c534808ce92c78adcfa2590928` DOES
+   validate today's signatures **over the old 3-field form** — the key is
+   right, only the message shape is stale. `package.sh`'s built-in
+   self-verify could never catch this: it re-checks the same 3-field message
+   it just signed.
+
+   Broken today: every entry in `registry.json` and every
+   `dist/<slug>/versions/<version>/signature.sig`. `vynm install <anything>`
+   refuses them all; only self-hosted registries signed under S1 work.
+
+   **Fix:**
+   1. `scripts/package.sh`: pass `$status`, `$archive_url`, `$min_kernel`,
+      `$max_kernel` into the signing python block (all four already exist in
+      bash scope before the signing step runs) and build the seven-field
+      message exactly as `signed_message()` does. Keep the self-verify and
+      the pinned-key cross-check unchanged.
+   2. Re-sign everything already published WITHOUT rebuilding archives:
+      small `scripts/resign.py` that walks each version entry of
+      `registry.json`, recomputes the seven-field signature from the stored
+      fields using `VEYRON_SIGNING_KEY_HEX`, re-hashes the published zip to
+      assert the stored `sha256` is still byte-true, and rewrites both the
+      registry entry and `dist/<slug>/versions/<version>/signature.sig`.
+   3. Update the dist-layout comment (~L17) and README's signing paragraph
+      to the seven-field form.
+   4. Acceptance (cross-repo): against the live registry,
+      `vynm search database` lists it and `vynm install database` exits 0
+      with the plugin tree extracted and the ledger recorded; negative test
+      still fails closed — tamper one byte of `archive_url` → `exit 3`
+      ("failed signature verification").
+
+   Requires the maintainer signing key (`VEYRON_SIGNING_KEY_HEX`) — nobody
+   else can produce valid signatures, so steps 2+4 are maintainer-side.
 
 
 - No plugin-to-plugin direct calls — everything routes through the kernel,
