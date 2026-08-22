@@ -35,6 +35,7 @@ file is the cross-plugin picture only.
 | `filesystem` | `plugins/filesystem/` | — | sandboxed file read/write + read-only browse (`fs_list`/`fs_read`/`fs_write`) behind a default-deny allowlist of absolute roots (`FILES_PLUGIN_ALLOWED_ROOTS`); deepest-existing-ancestor canonicalize blocks `..` traversal and symlink escapes; write refuses symlink/dir/root targets (`PERMISSION_FILES_READ`/`WRITE`). v0.1.0: 33 tests |
 | `search` | `plugins/search/` | `network`, `secrets` | web search (`web_search`) via brave/tavily adapters routed through `network`'s gated `http_request` (T-19 caller), keys vault-first via `secrets`, `SEARCH_PLUGIN_ALLOWED_KEY_ENVS` default-deny allowlist; normalized `{query, results[{title,url,snippet}]}`. v0.1.0: 34 tests incl. fake-kernel end-to-end |
 | `system` | `plugins/system/` | — | local host queries + reversible controls — `sys_info`/`sys_battery`/`sys_procs`/`sys_volume[_set/_mute]`/`sys_brightness[_set]`/`sys_lock`/`sys_power_profile[_set]` behind one `PERMISSION_SYSTEM`; backend traits + startup detection, absent capability → `ERR_SYS_NOT_SUPPORTED` naming it. Linux: UPower DisplayDevice, wpctl→pactl, sysfs write→brightnessctl fallback (0 clamps to non-blanking step), ScreenSaver→loginctl chain, ppd both name/path generations; macOS: pmset/osascript/CGSession via non-gated pure parsers. v0.3.0: 45 unit + 4 fake-kernel e2e tests |
+| `scheduler` | `plugins/scheduler/` | `database` | once/cron schedules persisted as `sched:<id>` JSON docs over `database` (`PERMISSION_STORAGE`, `PERMISSION_EVENT_PUBLISH`). Scan loop like calendar's (`SCHEDULER_PLUGIN_SCAN_SECS`, first tick = startup catch-up): one-shots resolve `delay_ms` at set time and mark fired BEFORE dispatch (at-most-once, `late: true` after downtime); cron (5/6-field, fixed UTC offset) anchors to its last scheduled fire — missed occurrences skipped. Fire kinds: best-effort `plugin.scheduler.fired` event or kernel-routed action call (gated targets fail into `last_error` unless the operator grants the permission — T-19 holds, no laundering) |
 
 ## Planned
 
@@ -42,7 +43,6 @@ Dependency order — each row can start once everything in "depends on" ships.
 
 | Plugin | Purpose | Depends on | Permissions |
 |---|---|---|---|
-| `scheduler` | fire an action/event once after a delay, or repeatedly on a cron expr | `database` (persist schedule state across restarts) | `PERMISSION_SCHEDULER` (existing) |
 | `vector-db` | embedding upsert/similarity search (`vec_upsert`/`vec_query`) | — | own storage backend, standalone |
 | `email` | send/receive mail (SMTP/IMAP) | `network`, `secrets` (mailbox creds) | `network` (caller of gated `http_request`) |
 | `launcher` | launch apps/games by name — Steam (`steam://rungameid/<id>`, reads `libraryfolders.vdf`/`appmanifest_*.acf`) as one provider, generic app launch as another | `filesystem` (read manifests) | `PERMISSION_LAUNCH` (defined, proto v1.4) |
@@ -201,9 +201,9 @@ maintain):
 `database` and `network` are migrated onto the SDK loop (their hand-rolled
 `run_loop`/`spawn_handler`/`response_envelope` copies are deleted); all their
 existing tests — including the deadlock-regression and per-caller-cap tests —
-pass unchanged. `vector-db`, `scheduler`, and anything else on the hot path
-get the pattern for free by implementing `ConcurrentHandler`. `notes`/
-`calendar` don't implement it — they're CRUD wrappers that call `database`
+pass unchanged. `vector-db` and anything else on the hot path get the pattern for free by
+implementing `ConcurrentHandler`. `notes`/`calendar`/`scheduler` don't
+implement it — they're CRUD wrappers that call `database`
 through a channel-fronted RPC proxy so their serve loop remains the single
 reader of the connection (`send_action`'s discard-while-waiting would
 otherwise eat inbound frames during handler or timer-driven outbound calls).
