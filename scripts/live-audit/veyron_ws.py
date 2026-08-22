@@ -2,7 +2,7 @@
 import asyncio, json, struct, zlib, hmac, hashlib, time, uuid
 import websockets
 import sys
-sys.path.insert(0, "/home/behzod/projects/veyron-core/veyron-sdk-python")
+sys.path.insert(0, "/home/behzod/projects/veyron-core/vynkor-sdk-python")
 from veyron import veyron_protocol_pb2 as pb
 
 MAGIC = 0x5652

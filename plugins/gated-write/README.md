@@ -1,7 +1,7 @@
 # gated-write
 
 Reference high-risk plugin demonstrating the **D-09 confirmation gate** from
-the [Veyron Rust SDK](https://github.com/veyron-core/veyron-sdk-rust).
+the [Veyron Rust SDK](https://github.com/veyron-core/vynkor-sdk-rust).
 
 The risky operation — writing a file into a configured data dir — is split
 into two actions:

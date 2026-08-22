@@ -278,7 +278,7 @@ What's actually new, in `veyron`:
   build scripts generate from the *installed package* — removes vendoring
   entirely, so the SDKs can't drift even in principle.
   (`scripts/gen_proto_python.py` was repaired earlier — it regenerates the
-  Python binding from `../veyron-wire/proto/` and works.)
+  Python binding from `../vynkor-wire/proto/` and works.)
 - **`src/auth/permissions.rs::required_permission_for_action`** — only
   needs an entry if a new plugin's action is *providable through another
   plugin* (the anti-laundering pattern that exists for `http_request` →
@@ -363,7 +363,7 @@ and the R10-03 cache is ready:
     "category": "ai",
     "tags": ["llm"],
     "status": "stable",
-    "source_url": "https://github.com/veyron-core/veyron-plugins/tree/main/plugins/ai",
+    "source_url": "https://github.com/veyron-core/vynkor-plugins/tree/main/plugins/ai",
     "versions": {
       "0.1.0": {
         "archive_url": "dist/ai/versions/0.1.0/ai-0.1.0.zip",
@@ -461,12 +461,17 @@ generated `PermissionType`. A protocol/permission change is therefore already
 
 ### 5. Signing
 
-Trust model unchanged (T-11): Ed25519 over `{slug}:{version}:{sha256}`,
-verified against the pinned `MAINTAINER_PUBLIC_KEY_HEX` (or the
-`marketplace_public_key` override for private/community registries). The
-maintainer signs locally with a personal offline key; `scripts/package.sh`
-gains a sign step (key from env/file, never committed). Host migration never
-touches keys — only `registry_url`.
+Trust model (T-11): Ed25519 over the **S1 canonical message**
+`{slug}:{version}:{sha256}:{status}:{archive_url}:{min_kernel_version}:{max_kernel_version}`
+— the whole delivery surface is bound, so a compromised serving channel can't
+flip `revoked → stable`, redirect `archive_url`, or loosen the compat bounds
+without breaking the signature. Verified against the pinned maintainer public
+key (`official_source()` in vynkor-manager). The canonical form lives in
+`vynkor-manager/src/registry.rs::signed_message`; `scripts/package.sh`
+signs it at packaging time (key from env/file, never committed) and
+`scripts/resign.py` re-signs published entries without rebuilding archives
+(`--check` verifies existing signatures against the pin). Host migration
+never touches keys — only `registry_url`.
 
 ### Sequencing
 
