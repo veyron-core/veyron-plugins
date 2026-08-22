@@ -1,0 +1,18 @@
+# scheduler plugin config. Copy to config.yaml; every key is optional.
+db_timeout_ms: 5000   # timeout for each database IPC call and each dispatched scheduled action
+scan_secs: 30         # schedule scan interval in seconds; bounds firing precision; 0 disables scanning entirely
+
+# Timing model (v0.1):
+#   - every schedule is one JSON document `sched:<id>` in this plugin's own
+#     database namespace — restart-safe by construction;
+#   - the scan runs every scan_secs (first tick doubles as startup catch-up);
+#   - one-shots are marked fired BEFORE dispatching (at-most-once) and fire
+#     with late: true when they came due while the plugin was down;
+#   - cron schedules anchor to their last fire (or creation): missed
+#     occurrences during downtime are skipped, resuming from the first
+#     occurrence after now;
+#   - dispatch failures of action fires land on the document's last_error.
+# Every mutation publishes a best-effort `plugin.scheduler.changed` event
+# {op: created|updated|deleted, id}; every fire publishes
+# `plugin.scheduler.fired` {schedule_id, name, scheduled_for_ms, late,
+# fire_count, fire, payload}.
