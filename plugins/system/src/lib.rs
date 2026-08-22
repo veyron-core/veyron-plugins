@@ -29,8 +29,8 @@ pub mod volume;
 use std::sync::Arc;
 
 use serde_json::json;
-use veyron_sdk::proto::{envelope, ActionResponse, ActionStatus, Envelope, PluginManifest};
-use veyron_sdk::{Plugin, VeyronError};
+use vynkor_sdk::proto::{envelope, ActionResponse, ActionStatus, Envelope, PluginManifest};
+use vynkor_sdk::{Plugin, VynkorError};
 
 use crate::backends::SystemBackends;
 use crate::error::SystemError;
@@ -167,7 +167,7 @@ impl Plugin for SystemPlugin {
         }
     }
 
-    async fn on_message(&mut self, envelope: Envelope) -> Result<Option<Envelope>, VeyronError> {
+    async fn on_message(&mut self, envelope: Envelope) -> Result<Option<Envelope>, VynkorError> {
         let Some(envelope::Payload::ActionRequest(req)) = envelope.payload else {
             return Ok(None);
         };

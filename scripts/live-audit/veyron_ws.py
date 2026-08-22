@@ -58,7 +58,7 @@ class VeyronWsClient:
         localhost_dev_tls.check_hostname = False
         localhost_dev_tls.verify_mode = ssl.CERT_NONE
         self.ws = await websockets.connect(
-            self.url.replace("ws://", "wss://"), subprotocols=["veyron", self.jwt],
+            self.url.replace("ws://", "wss://"), subprotocols=["vynkor", self.jwt],
             max_size=512 * 1024 * 1024, ssl=localhost_dev_tls)
         reg = pb.Envelope(plugin_register=pb.PluginRegister(
             plugin_id=self.plugin_id,

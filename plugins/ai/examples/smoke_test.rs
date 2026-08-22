@@ -1,9 +1,9 @@
-use veyron_sdk::proto::PluginManifest;
-use veyron_sdk::VeyronClient;
+use vynkor_sdk::proto::PluginManifest;
+use vynkor_sdk::VynkorClient;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = VeyronClient::connect("/tmp/ai-smoke-veyron.sock").await?;
+    let mut client = VynkorClient::connect("/tmp/ai-smoke-vyn.sock").await?;
     let ack = client
         .register_full("smoke-test-caller", "0.1.0", PluginManifest::default(), "")
         .await?;

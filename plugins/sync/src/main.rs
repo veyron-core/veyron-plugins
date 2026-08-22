@@ -14,8 +14,8 @@ use std::sync::Arc;
 
 use sync_plugin::db::DbConfig;
 use sync_plugin::handler::SyncHandler;
-use veyron_sdk::concurrent::serve_concurrent;
-use veyron_sdk::{VeyronClient, VeyronError};
+use vynkor_sdk::concurrent::serve_concurrent;
+use vynkor_sdk::{VynkorClient, VynkorError};
 
 fn load_config() -> DbConfig {
     let data_dir = std::env::var("SYNC_PLUGIN_DATA_DIR").unwrap_or_else(|_| {
@@ -42,7 +42,7 @@ fn load_config() -> DbConfig {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), VeyronError> {
+async fn main() -> Result<(), VynkorError> {
     let max_value_bytes = std::env::var("SYNC_PLUGIN_MAX_VALUE_BYTES")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -67,8 +67,8 @@ async fn main() -> Result<(), VeyronError> {
         .unwrap_or_else(|e| panic!("failed to open sync database: {e}")),
     );
 
-    let client = VeyronClient::connect_from_env().await?;
-    let token = std::env::var("VEYRON_JWT_TOKEN").unwrap_or_default();
+    let client = VynkorClient::connect_from_env().await?;
+    let token = std::env::var("VYN_JWT_TOKEN").unwrap_or_default();
     serve_concurrent(client, &token, handler).await?;
 
     println!("[sync] shutting down");
@@ -82,12 +82,12 @@ mod tests {
     use sync_plugin::db::DbConfig;
     use sync_plugin::handler::SyncHandler;
     use tokio::net::UnixStream;
-    use veyron_sdk::concurrent::run_concurrent_loop;
-    use veyron_sdk::proto::{envelope, ActionRequest, ActionStatus, Envelope, PluginShutdown};
-    use veyron_sdk::VeyronClient;
+    use vynkor_sdk::concurrent::run_concurrent_loop;
+    use vynkor_sdk::proto::{envelope, ActionRequest, ActionStatus, Envelope, PluginShutdown};
+    use vynkor_sdk::VynkorClient;
 
-    /// Drives the concurrent loop over a real `VeyronClient` (no live kernel
-    /// needed — `UnixStream::pair` plus `VeyronClient::from_stream` is the
+    /// Drives the concurrent loop over a real `VynkorClient` (no live kernel
+    /// needed — `UnixStream::pair` plus `VynkorClient::from_stream` is the
     /// SDK's own test pattern). The fake "kernel" fires a `sync_set` and
     /// asserts that the `ActionResponse` comes back first and the
     /// `sync.delta` `EventPublish` envelope arrives right after it, with the
@@ -112,8 +112,8 @@ mod tests {
         );
 
         let (plugin_side, kernel_side) = UnixStream::pair().unwrap();
-        let client = VeyronClient::from_stream(plugin_side, None);
-        let mut kernel = VeyronClient::from_stream(kernel_side, None);
+        let client = VynkorClient::from_stream(plugin_side, None);
+        let mut kernel = VynkorClient::from_stream(kernel_side, None);
 
         let loop_task = tokio::spawn(run_concurrent_loop(client, handler));
 

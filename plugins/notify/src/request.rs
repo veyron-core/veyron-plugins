@@ -38,7 +38,7 @@ pub struct NotifyParams {
     /// `0` leaves the provider default. Optional.
     pub timeout_ms: Option<u64>,
     /// notify-send app name. Optional; falls back to
-    /// `NOTIFY_PLUGIN_APP_NAME`, then `veyron`.
+    /// `NOTIFY_PLUGIN_APP_NAME`, then `vynkor`.
     pub app_name: Option<String>,
     /// Store only — no delivery; the notification lands in the inbox and is
     /// visible later via `notify_list`. `provider`/`speak` are ignored when

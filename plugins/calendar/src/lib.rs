@@ -8,7 +8,7 @@
 //! was down fire once on the next scan with `late: true`.
 //!
 //! Outbound calls go through [`Rpc`], a channel-fronted proxy: handler and
-//! scan tasks never touch the `VeyronClient` directly, because `send_action`
+//! scan tasks never touch the `VynkorClient` directly, because `send_action`
 //! discards every non-matching inbound frame while it waits — a scan started
 //! by the timer would silently eat user requests arriving mid-scan. With the
 //! proxy the serve loop stays the single reader: user requests, pings and
@@ -21,7 +21,7 @@ pub mod store;
 
 use serde_json::{json, Value};
 use tokio::sync::{mpsc, oneshot};
-use veyron_sdk::proto::{envelope, Envelope, EventPublish};
+use vynkor_sdk::proto::{envelope, Envelope, EventPublish};
 
 use reminders::DueFire;
 use store::EventDoc;

@@ -18,11 +18,11 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::sync::RwLock;
 
-use veyron_sdk::concurrent::{response_envelope, ConcurrentHandler};
-use veyron_sdk::proto::{
+use vynkor_sdk::concurrent::{response_envelope, ConcurrentHandler};
+use vynkor_sdk::proto::{
     envelope, ActionRequest, ActionStatus, Envelope, Event, PluginManifest, Pong,
 };
-use veyron_sdk::{VeyronClient, VeyronError};
+use vynkor_sdk::{VynkorClient, VynkorError};
 
 pub mod request;
 
@@ -100,7 +100,7 @@ impl ConcurrentHandler for SyncClientHandler {
         }
     }
 
-    async fn on_init(&self, client: &mut VeyronClient) -> Result<(), VeyronError> {
+    async fn on_init(&self, client: &mut VynkorClient) -> Result<(), VynkorError> {
         client
             .subscribe(vec!["plugin.sync.sync.delta".to_string()])
             .await?;
@@ -131,7 +131,7 @@ impl ConcurrentHandler for SyncClientHandler {
         Ok(())
     }
 
-    async fn on_event(&self, event: Event) -> Result<Option<Envelope>, VeyronError> {
+    async fn on_event(&self, event: Event) -> Result<Option<Envelope>, VynkorError> {
         if event.event_type != "plugin.sync.sync.delta" {
             return Ok(None);
         }
@@ -169,7 +169,7 @@ impl ConcurrentHandler for SyncClientHandler {
         vec![response_envelope(req.action_id, result)]
     }
 
-    async fn on_message(&self, _env: Envelope) -> Result<Option<Envelope>, VeyronError> {
+    async fn on_message(&self, _env: Envelope) -> Result<Option<Envelope>, VynkorError> {
         // heartbeat `sync_set` ActionResponses land here; fire-and-forget, so
         // nothing to do.
         Ok(None)
@@ -179,14 +179,14 @@ impl ConcurrentHandler for SyncClientHandler {
 /// Drive the sync-client message loop: one task owns the client and
 /// `select!`s between inbound frames and the mpsc channel that both spawned
 /// handler tasks and the heartbeat task push into. Copied from
-/// `veyron-sdk/src/concurrent.rs::run_concurrent_loop` with one difference —
+/// `vynkor-sdk/src/concurrent.rs::run_concurrent_loop` with one difference —
 /// the heartbeat producer task — which is why the SDK's loop can't be used
 /// as-is (it doesn't expose its channel).
 pub async fn run_sync_client_loop(
-    mut client: VeyronClient,
+    mut client: VynkorClient,
     handler: Arc<SyncClientHandler>,
     heartbeat_secs: u64,
-) -> Result<(), VeyronError> {
+) -> Result<(), VynkorError> {
     let (tx, mut rx) = mpsc::channel::<Envelope>(64);
 
     if heartbeat_secs > 0 {
@@ -258,11 +258,11 @@ pub async fn run_sync_client_loop(
 /// `serve_concurrent` but with [`run_sync_client_loop`] in place of its
 /// generic loop.
 pub async fn serve_cycle(
-    mut client: VeyronClient,
+    mut client: VynkorClient,
     jwt_token: &str,
     handler: Arc<SyncClientHandler>,
     heartbeat_secs: u64,
-) -> Result<(), VeyronError> {
+) -> Result<(), VynkorError> {
     let ack = client
         .register_full(
             handler.id(),
@@ -272,7 +272,7 @@ pub async fn serve_cycle(
         )
         .await?;
     if !ack.accepted {
-        return Err(VeyronError::PermissionDenied(format!(
+        return Err(VynkorError::PermissionDenied(format!(
             "registration rejected: {}",
             ack.reject_reason
         )));
@@ -376,12 +376,12 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use tokio::net::UnixStream;
-    use veyron_sdk::proto::{ActionResponse, PluginRegisterAck, PluginShutdown, Subscribe};
+    use vynkor_sdk::proto::{ActionResponse, PluginRegisterAck, PluginShutdown, Subscribe};
 
     /// Recv the next frame from the plugin with a timeout so a deadlock turns
     /// into a test failure instead of a CI hang (SDK `UnixStream::pair`
     /// pattern).
-    async fn recv(kernel: &mut VeyronClient) -> Envelope {
+    async fn recv(kernel: &mut VynkorClient) -> Envelope {
         tokio::time::timeout(Duration::from_secs(5), kernel.recv())
             .await
             .expect("timed out waiting for plugin frame")
@@ -390,7 +390,7 @@ mod tests {
 
     /// Drive the register → subscribe → snapshot handshake the plugin's
     /// `serve_cycle` performs, answering the snapshot pull with `snapshot`.
-    async fn drive_registration(kernel: &mut VeyronClient, snapshot: serde_json::Value) {
+    async fn drive_registration(kernel: &mut VynkorClient, snapshot: serde_json::Value) {
         let env = recv(kernel).await;
         assert!(
             matches!(env.payload, Some(envelope::Payload::PluginRegister(_))),
@@ -444,7 +444,7 @@ mod tests {
 
     /// Query the mirror through the plugin's own action; returns the decoded
     /// `{version, state}` JSON.
-    async fn query_state(kernel: &mut VeyronClient, action_id: &str) -> serde_json::Value {
+    async fn query_state(kernel: &mut VynkorClient, action_id: &str) -> serde_json::Value {
         kernel
             .send(
                 "sync-client",
@@ -471,7 +471,7 @@ mod tests {
         serde_json::from_slice(&resp.data_json).unwrap()
     }
 
-    async fn send_delta(kernel: &mut VeyronClient, delta: serde_json::Value) {
+    async fn send_delta(kernel: &mut VynkorClient, delta: serde_json::Value) {
         kernel
             .send(
                 "sync-client",
@@ -498,8 +498,8 @@ mod tests {
     }
 
     async fn shutdown(
-        kernel: &mut VeyronClient,
-        loop_task: tokio::task::JoinHandle<Result<(), VeyronError>>,
+        kernel: &mut VynkorClient,
+        loop_task: tokio::task::JoinHandle<Result<(), VynkorError>>,
     ) {
         kernel
             .send(
@@ -521,11 +521,11 @@ mod tests {
             .unwrap();
     }
 
-    fn pair() -> (VeyronClient, VeyronClient) {
+    fn pair() -> (VynkorClient, VynkorClient) {
         let (plugin_side, kernel_side) = UnixStream::pair().unwrap();
         (
-            VeyronClient::from_stream(plugin_side, None),
-            VeyronClient::from_stream(kernel_side, None),
+            VynkorClient::from_stream(plugin_side, None),
+            VynkorClient::from_stream(kernel_side, None),
         )
     }
 

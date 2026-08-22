@@ -11,16 +11,16 @@ use std::sync::Arc;
 use filesystem_plugin::config::Config;
 use filesystem_plugin::handler::Handler;
 use filesystem_plugin::sandbox::Sandbox;
-use veyron_sdk::concurrent::serve_concurrent;
-use veyron_sdk::{VeyronClient, VeyronError};
+use vynkor_sdk::concurrent::serve_concurrent;
+use vynkor_sdk::{VynkorClient, VynkorError};
 
 #[tokio::main]
-async fn main() -> Result<(), VeyronError> {
+async fn main() -> Result<(), VynkorError> {
     let sandbox = Sandbox::from_env();
     let handler = Arc::new(Handler::new(sandbox, Config::from_env()));
 
-    let client = VeyronClient::connect_from_env().await?;
-    let token = std::env::var("VEYRON_JWT_TOKEN").unwrap_or_default();
+    let client = VynkorClient::connect_from_env().await?;
+    let token = std::env::var("VYN_JWT_TOKEN").unwrap_or_default();
     serve_concurrent(client, &token, handler).await?;
 
     eprintln!("[filesystem] shutting down");

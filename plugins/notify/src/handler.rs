@@ -4,7 +4,7 @@
 use crate::inbox::{self, Inbox};
 use crate::providers::{self, ProviderKind};
 use crate::request::{IdParams, ListParams, NotifyParams};
-use veyron_sdk::VeyronClient;
+use vynkor_sdk::VynkorClient;
 
 /// `notify_send`: parse + validate the request, resolve the provider kind,
 /// then either store it silently or deliver it (optionally with tts
@@ -18,7 +18,7 @@ use veyron_sdk::VeyronClient;
 ///   when the inbox is available — a missing `NOTIFY_PLUGIN_DATA_DIR` must
 ///   not fail a normal notification.
 pub async fn handle_notify_send(
-    client: &mut VeyronClient,
+    client: &mut VynkorClient,
     params_json: &[u8],
 ) -> Result<Vec<u8>, String> {
     let params = NotifyParams::parse(params_json)?;

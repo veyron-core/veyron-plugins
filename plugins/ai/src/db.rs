@@ -1,6 +1,6 @@
 //! SQLite persistence for the `ai` plugin: declared/discovered models, agent
 //! profiles, and per-call token usage for analytics. One file (`ai.db`) under
-//! the kernel-granted plugin data dir (`VEYRON_DATA_DIR`); falls back to an
+//! the kernel-granted plugin data dir (`VYN_DATA_DIR`); falls back to an
 //! in-memory database when the kernel doesn't provide one (usage then does
 //! not survive a restart).
 

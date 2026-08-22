@@ -5,8 +5,8 @@
 //! key is resolved per request (no cache) so vault rotation takes effect
 //! immediately. The resolved key value never appears in any error or log line.
 
-use veyron_sdk::proto::ActionStatus;
-use veyron_sdk::VeyronClient;
+use vynkor_sdk::proto::ActionStatus;
+use vynkor_sdk::VynkorClient;
 
 /// `secrets`' `secret_get` response shape — see the secrets plugin.
 #[derive(serde::Deserialize)]
@@ -21,7 +21,7 @@ const SECRETS_TIMEOUT_MS: u32 = 3000;
 
 /// Resolve the provider API key for `handle`: vault first, env var second.
 /// Returns `Err` only when neither source has a non-empty value.
-pub async fn resolve_api_key(client: &mut VeyronClient, handle: &str) -> Result<String, String> {
+pub async fn resolve_api_key(client: &mut VynkorClient, handle: &str) -> Result<String, String> {
     // Hop 1: the `secrets` plugin's vault. Any failure here — network-level
     // error, non-OK status, malformed reply, not found, or an empty value —
     // is logged (without the value) and falls through to the env fallback.

@@ -1,7 +1,7 @@
 //! Library crate for the `secrets` plugin.
 //!
 //! The `ConcurrentHandler` impl lives here (not in `main`) because of the
-//! orphan rule: the trait comes from `veyron-sdk`, the type from this crate.
+//! orphan rule: the trait comes from `vynkor-sdk`, the type from this crate.
 
 pub mod handler;
 pub mod request;
@@ -9,9 +9,9 @@ pub mod vault;
 
 use std::sync::Arc;
 
-use veyron_sdk::concurrent::{response_envelope, ConcurrentHandler};
-use veyron_sdk::proto::{ActionRequest, Envelope, PluginManifest};
-use veyron_sdk::VeyronError;
+use vynkor_sdk::concurrent::{response_envelope, ConcurrentHandler};
+use vynkor_sdk::proto::{ActionRequest, Envelope, PluginManifest};
+use vynkor_sdk::VynkorError;
 
 pub const PLUGIN_ID: &str = "secrets";
 pub const PLUGIN_VERSION: &str = "0.1.0";
@@ -45,7 +45,7 @@ impl ConcurrentHandler for handler::Handler {
         vec![response_envelope(req.action_id, result)]
     }
 
-    async fn on_shutdown(&self) -> Result<(), VeyronError> {
+    async fn on_shutdown(&self) -> Result<(), VynkorError> {
         Ok(())
     }
 }

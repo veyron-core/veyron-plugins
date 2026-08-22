@@ -396,7 +396,7 @@ fn watched() -> &'static Mutex<HashSet<String>> {
 
 /// Spawn the supervisor that keeps one signal-watcher task per MPRIS player.
 /// Called from `on_init`; detached — it only ever writes to `POS_CACHE`, so
-/// the single-reader rule on `VeyronClient` is untouched.
+/// the single-reader rule on `VynkorClient` is untouched.
 pub fn spawn_watch_task() {
     tokio::spawn(async move {
         let mut scan = tokio::time::interval(std::time::Duration::from_secs(5));

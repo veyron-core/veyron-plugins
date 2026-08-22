@@ -7,7 +7,7 @@
 //! construction.
 //!
 //! Outbound calls go through [`Rpc`], a channel-fronted proxy: handler tasks
-//! never touch the `VeyronClient` directly, because `send_action` discards
+//! never touch the `VynkorClient` directly, because `send_action` discards
 //! every non-matching inbound frame while it waits — that is only safe from
 //! a task owning ALL of the connection's traffic. With the proxy the serve
 //! loop stays the single reader: user requests, pings and publish-acks are

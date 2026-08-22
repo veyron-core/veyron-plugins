@@ -25,11 +25,11 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use network_plugin::{handler, request};
-use veyron_sdk::concurrent::{response_envelope, serve_concurrent};
-use veyron_sdk::proto::{
+use vynkor_sdk::concurrent::{response_envelope, serve_concurrent};
+use vynkor_sdk::proto::{
     envelope, ActionRequest, Envelope, EventPublish, EventPublishStatus, PluginManifest,
 };
-use veyron_sdk::{ConcurrentHandler, VeyronClient, VeyronError};
+use vynkor_sdk::{ConcurrentHandler, VynkorClient, VynkorError};
 
 /// Operator-only opt-in proxy for all outbound requests. Deliberately not a
 /// per-request param: a caller-controlled proxy would let any action bypass
@@ -696,7 +696,7 @@ impl ConcurrentHandler for NetworkPlugin {
         vec![envelope, event]
     }
 
-    async fn on_message(&self, env: Envelope) -> Result<Option<Envelope>, VeyronError> {
+    async fn on_message(&self, env: Envelope) -> Result<Option<Envelope>, VynkorError> {
         match env.payload {
             Some(envelope::Payload::EventPublishAck(ack)) => {
                 if ack.status != EventPublishStatus::EventPublishOk as i32 {
@@ -713,11 +713,11 @@ impl ConcurrentHandler for NetworkPlugin {
 
 /// Build the response envelope for a completed (or failed) action.
 #[tokio::main]
-async fn main() -> Result<(), VeyronError> {
+async fn main() -> Result<(), VynkorError> {
     let plugin = Arc::new(NetworkPlugin::new());
 
-    let client = VeyronClient::connect_from_env().await?;
-    let token = std::env::var("VEYRON_JWT_TOKEN").unwrap_or_default();
+    let client = VynkorClient::connect_from_env().await?;
+    let token = std::env::var("VYN_JWT_TOKEN").unwrap_or_default();
     serve_concurrent(client, &token, plugin).await?;
 
     println!("[network] shutting down");
@@ -729,9 +729,9 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use tokio::net::UnixStream;
-    use veyron_sdk::concurrent::run_concurrent_loop;
-    use veyron_sdk::proto::{ActionRequest, ActionStatus, PluginShutdown};
-    use veyron_sdk::VeyronClient;
+    use vynkor_sdk::concurrent::run_concurrent_loop;
+    use vynkor_sdk::proto::{ActionRequest, ActionStatus, PluginShutdown};
+    use vynkor_sdk::VynkorClient;
 
     /// Plugin whose SSRF policy permits loopback, so tests can hit local
     /// mock servers (the real `NetworkPlugin::new()` reads operator env and
@@ -840,8 +840,8 @@ mod tests {
 
     /// Regression test for the deadlock shape that motivated the concurrent
     /// loop (same pattern as `database`'s): fires a batch of
-    /// `http_request`s back-to-back over a real `VeyronClient`
-    /// (`UnixStream::pair` + `VeyronClient::from_stream` is the SDK's own
+    /// `http_request`s back-to-back over a real `VynkorClient`
+    /// (`UnixStream::pair` + `VynkorClient::from_stream` is the SDK's own
     /// test pattern) and then does *not* send anything until every response
     /// has been read back. The `tokio::time::timeout` wrapper turns "would
     /// have hung forever" into a clean failure.
@@ -851,8 +851,8 @@ mod tests {
         let url = mock_server_responding("HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\nhello").await;
 
         let (plugin_side, kernel_side) = UnixStream::pair().unwrap();
-        let client = VeyronClient::from_stream(plugin_side, None);
-        let mut kernel = VeyronClient::from_stream(kernel_side, None);
+        let client = VynkorClient::from_stream(plugin_side, None);
+        let mut kernel = VynkorClient::from_stream(kernel_side, None);
 
         let loop_task = tokio::spawn(run_concurrent_loop(client, plugin));
 
@@ -935,8 +935,8 @@ mod tests {
         let url = format!("http://{addr}/");
 
         let (plugin_side, kernel_side) = UnixStream::pair().unwrap();
-        let client = VeyronClient::from_stream(plugin_side, None);
-        let mut kernel = VeyronClient::from_stream(kernel_side, None);
+        let client = VynkorClient::from_stream(plugin_side, None);
+        let mut kernel = VynkorClient::from_stream(kernel_side, None);
         let loop_task = tokio::spawn(run_concurrent_loop(client, plugin));
 
         for i in 0..5 {
@@ -1056,8 +1056,8 @@ mod tests {
         let url = mock_server_responding("HTTP/1.1 200 OK\r\ncontent-length: 5\r\n\r\nhello").await;
 
         let (plugin_side, kernel_side) = UnixStream::pair().unwrap();
-        let client = VeyronClient::from_stream(plugin_side, None);
-        let mut kernel = VeyronClient::from_stream(kernel_side, None);
+        let client = VynkorClient::from_stream(plugin_side, None);
+        let mut kernel = VynkorClient::from_stream(kernel_side, None);
         let loop_task = tokio::spawn(run_concurrent_loop(client, plugin));
 
         let params = serde_json::json!({"method": "GET", "url": url}).to_string();
@@ -1138,8 +1138,8 @@ mod tests {
         let url = format!("http://{addr}/");
 
         let (plugin_side, kernel_side) = UnixStream::pair().unwrap();
-        let client = VeyronClient::from_stream(plugin_side, None);
-        let mut kernel = VeyronClient::from_stream(kernel_side, None);
+        let client = VynkorClient::from_stream(plugin_side, None);
+        let mut kernel = VynkorClient::from_stream(kernel_side, None);
         let loop_task = tokio::spawn(run_concurrent_loop(client, plugin));
 
         let params = serde_json::json!({

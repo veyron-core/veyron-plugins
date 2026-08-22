@@ -8,20 +8,20 @@ use std::sync::Arc;
 
 use system_plugin::backends::SystemBackends;
 use system_plugin::{SystemPlugin, PLUGIN_ID};
-use veyron_sdk::proto::{
+use vynkor_sdk::proto::{
     envelope, ActionRequest, ActionStatus, Envelope, PluginRegisterAck,
 };
-use veyron_sdk::{Plugin, VeyronClient};
+use vynkor_sdk::{Plugin, VynkorClient};
 
 async fn spawn_plugin(kernel_side: tokio::net::UnixStream) {
     let mut plugin = SystemPlugin::new(Arc::new(SystemBackends::default()));
-    let client = VeyronClient::from_stream(kernel_side, None);
+    let client = VynkorClient::from_stream(kernel_side, None);
     tokio::spawn(async move { plugin.serve(client, "").await });
 }
 
 /// The shim must ack the register frame before anything else —
 /// `register_full` treats the very next inbound frame as the ack.
-async fn handshake(client: &mut VeyronClient) {
+async fn handshake(client: &mut VynkorClient) {
     let reg = client.recv().await.expect("register frame");
     assert!(matches!(reg.payload, Some(envelope::Payload::PluginRegister(_))));
 
@@ -36,11 +36,11 @@ async fn handshake(client: &mut VeyronClient) {
 }
 
 async fn call_action(
-    client: &mut VeyronClient,
+    client: &mut VynkorClient,
     action_id: &str,
     action: &str,
     params_json: &[u8],
-) -> veyron_sdk::proto::ActionResponse {
+) -> vynkor_sdk::proto::ActionResponse {
     let req = Envelope {
         payload: Some(envelope::Payload::ActionRequest(ActionRequest {
             action_id: action_id.to_string(),
@@ -67,7 +67,7 @@ async fn registration_then_action_roundtrip() {
     let (plugin_side, kernel_side) = tokio::net::UnixStream::pair().expect("socket pair");
     spawn_plugin(plugin_side).await;
 
-    let mut kernel = VeyronClient::from_stream(kernel_side, None);
+    let mut kernel = VynkorClient::from_stream(kernel_side, None);
     handshake(&mut kernel).await;
 
     let resp = call_action(&mut kernel, "t1", "sys_info", b"").await;
@@ -83,7 +83,7 @@ async fn missing_backend_surfaces_not_supported_over_the_wire() {
     let (plugin_side, kernel_side) = tokio::net::UnixStream::pair().expect("socket pair");
     spawn_plugin(plugin_side).await;
 
-    let mut kernel = VeyronClient::from_stream(kernel_side, None);
+    let mut kernel = VynkorClient::from_stream(kernel_side, None);
     handshake(&mut kernel).await;
 
     let resp = call_action(&mut kernel, "t2", "sys_battery", b"").await;
@@ -101,7 +101,7 @@ async fn unknown_action_is_action_not_found_status() {
     let (plugin_side, kernel_side) = tokio::net::UnixStream::pair().expect("socket pair");
     spawn_plugin(plugin_side).await;
 
-    let mut kernel = VeyronClient::from_stream(kernel_side, None);
+    let mut kernel = VynkorClient::from_stream(kernel_side, None);
     handshake(&mut kernel).await;
 
     let resp = call_action(&mut kernel, "t3", "sys_frobnicate", b"").await;
@@ -113,7 +113,7 @@ async fn bad_params_rejected_over_the_wire() {
     let (plugin_side, kernel_side) = tokio::net::UnixStream::pair().expect("socket pair");
     spawn_plugin(plugin_side).await;
 
-    let mut kernel = VeyronClient::from_stream(kernel_side, None);
+    let mut kernel = VynkorClient::from_stream(kernel_side, None);
     handshake(&mut kernel).await;
 
     let resp = call_action(&mut kernel, "t4", "sys_volume_set", br#"{"percent": 500}"#).await;

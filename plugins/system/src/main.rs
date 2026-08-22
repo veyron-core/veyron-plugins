@@ -3,12 +3,12 @@
 
 use std::sync::Arc;
 
-use veyron_sdk::{Plugin, VeyronError};
+use vynkor_sdk::{Plugin, VynkorError};
 
 use system_plugin::{detect, PLUGIN_ID};
 
 #[tokio::main]
-async fn main() -> Result<(), VeyronError> {
+async fn main() -> Result<(), VynkorError> {
     let backends = Arc::new(detect::detect().await);
     println!(
         "[{PLUGIN_ID}] backends detected: battery={} volume={} brightness={} lock={} power={}",

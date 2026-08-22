@@ -17,8 +17,8 @@ use std::sync::Arc;
 
 use database_plugin::db::DbConfig;
 use database_plugin::handler::Handler;
-use veyron_sdk::concurrent::serve_concurrent;
-use veyron_sdk::{VeyronClient, VeyronError};
+use vynkor_sdk::concurrent::serve_concurrent;
+use vynkor_sdk::{VynkorClient, VynkorError};
 
 fn load_config() -> DbConfig {
     let data_dir = std::env::var("DATABASE_PLUGIN_DATA_DIR")
@@ -44,7 +44,7 @@ fn load_config() -> DbConfig {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), VeyronError> {
+async fn main() -> Result<(), VynkorError> {
     let max_value_bytes = std::env::var("DATABASE_PLUGIN_MAX_VALUE_BYTES")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -56,8 +56,8 @@ async fn main() -> Result<(), VeyronError> {
 
     let handler = Arc::new(Handler::new(load_config(), max_value_bytes, max_response_bytes));
 
-    let client = VeyronClient::connect_from_env().await?;
-    let token = std::env::var("VEYRON_JWT_TOKEN").unwrap_or_default();
+    let client = VynkorClient::connect_from_env().await?;
+    let token = std::env::var("VYN_JWT_TOKEN").unwrap_or_default();
     serve_concurrent(client, &token, handler).await?;
 
     println!("[database] shutting down");
@@ -71,18 +71,18 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::net::UnixStream;
-    use veyron_sdk::concurrent::run_concurrent_loop;
-    use veyron_sdk::proto::{envelope, ActionRequest, ActionStatus, Envelope, PluginShutdown};
-    use veyron_sdk::VeyronClient;
+    use vynkor_sdk::concurrent::run_concurrent_loop;
+    use vynkor_sdk::proto::{envelope, ActionRequest, ActionStatus, Envelope, PluginShutdown};
+    use vynkor_sdk::VynkorClient;
 
     /// Regression test for the deadlock this task fixes: drives the
-    /// concurrent loop over a real `VeyronClient` (no live kernel needed —
-    /// `UnixStream::pair` plus `VeyronClient::from_stream` is the SDK's own
-    /// test pattern, see `veyron-sdk/tests/protocol.rs`).
+    /// concurrent loop over a real `VynkorClient` (no live kernel needed —
+    /// `UnixStream::pair` plus `VynkorClient::from_stream` is the SDK's own
+    /// test pattern, see `vynkor-sdk/tests/protocol.rs`).
     ///
     /// The fake "kernel" fires a batch of `ActionRequest`s back-to-back and
     /// then does *not* send anything else until it has read back every
-    /// response. Under the old `Arc<Mutex<VeyronClient>>` design this would
+    /// response. Under the old `Arc<Mutex<VynkorClient>>` design this would
     /// deadlock: the loop task's `recv()` holds the lock while waiting for a
     /// frame that (by construction, in this test) never arrives until the
     /// responses are drained — but draining them is exactly what's blocked
@@ -103,8 +103,8 @@ mod tests {
         ));
 
         let (plugin_side, kernel_side) = UnixStream::pair().unwrap();
-        let client = VeyronClient::from_stream(plugin_side, None);
-        let mut kernel = VeyronClient::from_stream(kernel_side, None);
+        let client = VynkorClient::from_stream(plugin_side, None);
+        let mut kernel = VynkorClient::from_stream(kernel_side, None);
 
         let loop_task = tokio::spawn(run_concurrent_loop(client, handler));
 

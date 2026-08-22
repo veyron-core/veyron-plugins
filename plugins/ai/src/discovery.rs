@@ -5,8 +5,8 @@
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use veyron_sdk::proto::ActionStatus;
-use veyron_sdk::VeyronClient;
+use vynkor_sdk::proto::ActionStatus;
+use vynkor_sdk::VynkorClient;
 
 use crate::config::DiscoverySource;
 use crate::db::{AiDb, Model};
@@ -36,7 +36,7 @@ fn now_millis() -> i64 {
 /// Pull the model list of every configured discovery source and upsert the
 /// results into `db`. Returns per-source errors, never a hard failure.
 pub async fn refresh_models(
-    client: &mut VeyronClient,
+    client: &mut VynkorClient,
     db: &AiDb,
     sources: &[DiscoverySource],
 ) -> Result<Discovered, String> {
@@ -104,7 +104,7 @@ fn store_provider(provider: &str) -> String {
 }
 
 async fn fetch_ids(
-    client: &mut VeyronClient,
+    client: &mut VynkorClient,
     src: &DiscoverySource,
 ) -> Result<Vec<String>, String> {
     let (url, headers) = match src.provider.as_str() {
@@ -133,7 +133,7 @@ async fn fetch_ids(
 }
 
 async fn http_get(
-    client: &mut VeyronClient,
+    client: &mut VynkorClient,
     url: &str,
     headers: &HashMap<String, String>,
     timeout_ms: u64,

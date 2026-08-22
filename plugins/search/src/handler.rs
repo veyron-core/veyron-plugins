@@ -3,7 +3,7 @@
 //! `network`'s `http_request` action, and map the response back to
 //! `search`'s normalized shape.
 
-use veyron_sdk::VeyronClient;
+use vynkor_sdk::VynkorClient;
 
 use crate::provider::{brave::BraveProvider, tavily::TavilyProvider, Provider, SearchResponse};
 use crate::request::{self, Provider as RequestProvider};
@@ -22,7 +22,7 @@ struct NetworkHttpResponse {
 /// `ActionResponse.data_json` on success, or a human-readable error (never
 /// containing the resolved API key) on failure.
 pub async fn handle_web_search(
-    client: &mut VeyronClient,
+    client: &mut VynkorClient,
     params_json: &[u8],
 ) -> Result<Vec<u8>, String> {
     let params = request::parse_request(params_json)?;
@@ -57,7 +57,7 @@ pub async fn handle_web_search(
         .await
         .map_err(|e| format!("network plugin call failed: {e}"))?;
 
-    if action_resp.status != veyron_sdk::proto::ActionStatus::ActionOk as i32 {
+    if action_resp.status != vynkor_sdk::proto::ActionStatus::ActionOk as i32 {
         return Err(format!("network plugin error: {}", action_resp.error));
     }
 
@@ -92,5 +92,5 @@ pub async fn handle_web_search(
 
 // The non-2xx → clear-error mapping and the full request/response flow are
 // exercised end-to-end in the fake-kernel integration test in `main.rs` (the
-// handler needs a live `VeyronClient` for the `secret_get`/`http_request`
+// handler needs a live `VynkorClient` for the `secret_get`/`http_request`
 // hops, so the unit test lives there alongside the serve loop).

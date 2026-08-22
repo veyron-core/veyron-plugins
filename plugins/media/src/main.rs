@@ -9,10 +9,10 @@
 mod mpris;
 
 use serde_json::Value;
-use veyron_sdk::proto::{
+use vynkor_sdk::proto::{
     envelope, ActionRequest, ActionResponse, ActionStatus, Envelope, PluginManifest,
 };
-use veyron_sdk::{Plugin, VeyronClient, VeyronError};
+use vynkor_sdk::{Plugin, VynkorClient, VynkorError};
 
 const PLUGIN_ID: &str = "media";
 const PLUGIN_VERSION: &str = "0.0.3";
@@ -49,12 +49,12 @@ impl Plugin for MediaPlugin {
         }
     }
 
-    async fn on_init(&mut self, _client: &mut VeyronClient) -> Result<(), VeyronError> {
+    async fn on_init(&mut self, _client: &mut VynkorClient) -> Result<(), VynkorError> {
         mpris::spawn_watch_task();
         Ok(())
     }
 
-    async fn on_message(&mut self, envelope: Envelope) -> Result<Option<Envelope>, VeyronError> {
+    async fn on_message(&mut self, envelope: Envelope) -> Result<Option<Envelope>, VynkorError> {
         match envelope.payload {
             Some(envelope::Payload::ActionRequest(req)) => {
                 let response = handle_action_request(req).await;
@@ -67,7 +67,7 @@ impl Plugin for MediaPlugin {
         }
     }
 
-    async fn on_shutdown(&mut self) -> Result<(), VeyronError> {
+    async fn on_shutdown(&mut self) -> Result<(), VynkorError> {
         Ok(())
     }
 }
@@ -234,6 +234,6 @@ fn parse_volume(params: &Value) -> Option<f64> {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), VeyronError> {
+async fn main() -> Result<(), VynkorError> {
     MediaPlugin.run().await
 }
