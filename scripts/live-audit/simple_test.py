@@ -53,7 +53,7 @@ TESTS = [
     ("stt",        "stt_models", {"provider": "sherpa"}, 120),
     ("stt",        "stt_transcribe", {"provider": "sherpa",
         "audio_base64": __import__("base64").b64encode(
-            open("/home/behzod/projects/veyron-core/veyron-plugins/models/stt/zipformer-ru-int8/test_wavs/0.wav","rb").read()).decode(),
+            open("/home/behzod/projects/veyron-core/vynkor-plugins/models/stt/zipformer-ru-int8/test_wavs/0.wav","rb").read()).decode(),
         "format": "wav"}, 180),
 ]
 

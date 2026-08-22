@@ -1,6 +1,6 @@
 # veyron-plugins
 
-Plugins for the [Veyron](https://github.com/veyron-core/veyron) plugin
+Plugins for the [Veyron](https://github.com/veyron-core/vynkor) plugin
 kernel.
 
 ## Naming: vynkor

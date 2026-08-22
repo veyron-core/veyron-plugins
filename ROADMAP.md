@@ -278,7 +278,7 @@ What's actually new, in `veyron`:
   build scripts generate from the *installed package* — removes vendoring
   entirely, so the SDKs can't drift even in principle.
   (`scripts/gen_proto_python.py` was repaired earlier — it regenerates the
-  Python binding from `../veyron-wire/proto/` and works.)
+  Python binding from `../vynkor-wire/proto/` and works.)
 - **`src/auth/permissions.rs::required_permission_for_action`** — only
   needs an entry if a new plugin's action is *providable through another
   plugin* (the anti-laundering pattern that exists for `http_request` →
@@ -363,7 +363,7 @@ and the R10-03 cache is ready:
     "category": "ai",
     "tags": ["llm"],
     "status": "stable",
-    "source_url": "https://github.com/veyron-core/veyron-plugins/tree/main/plugins/ai",
+    "source_url": "https://github.com/veyron-core/vynkor-plugins/tree/main/plugins/ai",
     "versions": {
       "0.1.0": {
         "archive_url": "dist/ai/versions/0.1.0/ai-0.1.0.zip",

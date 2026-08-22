@@ -16,7 +16,7 @@ Run shape: generate drop-ins → start kernel with a test `config.yaml`
 (TLS on 8130, jwt_secret ≥ 32 bytes) → wait for registration
 (`GET /plugins`) → `python -u simple_test.py`, then `load_test.py`.
 Requires Python ≥3.10 with `websockets`, `protobuf`, `cryptography`,
-`zstandard`; imports generated types from `../veyron-sdk-python`.
+`zstandard`; imports generated types from `../vynkor-sdk-python`.
 
 Gotchas encoded here, learned the hard way:
 
