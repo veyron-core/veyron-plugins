@@ -36,6 +36,7 @@ file is the cross-plugin picture only.
 | `search` | `plugins/search/` | `network`, `secrets` | web search (`web_search`) via brave/tavily adapters routed through `network`'s gated `http_request` (T-19 caller), keys vault-first via `secrets`, `SEARCH_PLUGIN_ALLOWED_KEY_ENVS` default-deny allowlist; normalized `{query, results[{title,url,snippet}]}`. v0.1.0: 34 tests incl. fake-kernel end-to-end |
 | `system` | `plugins/system/` | — | local host queries + reversible controls — `sys_info`/`sys_battery`/`sys_procs`/`sys_volume[_set/_mute]`/`sys_brightness[_set]`/`sys_lock`/`sys_power_profile[_set]` behind one `PERMISSION_SYSTEM`; backend traits + startup detection, absent capability → `ERR_SYS_NOT_SUPPORTED` naming it. Linux: UPower DisplayDevice, wpctl→pactl, sysfs write→brightnessctl fallback (0 clamps to non-blanking step), ScreenSaver→loginctl chain, ppd both name/path generations; macOS: pmset/osascript/CGSession via non-gated pure parsers. v0.3.0: 45 unit + 4 fake-kernel e2e tests |
 | `scheduler` | `plugins/scheduler/` | `database` | once/cron schedules persisted as `sched:<id>` JSON docs over `database` (`PERMISSION_STORAGE`, `PERMISSION_EVENT_PUBLISH`). Scan loop like calendar's (`SCHEDULER_PLUGIN_SCAN_SECS`, first tick = startup catch-up): one-shots resolve `delay_ms` at set time and mark fired BEFORE dispatch (at-most-once, `late: true` after downtime); cron (5/6-field, fixed UTC offset) anchors to its last scheduled fire — missed occurrences skipped. Fire kinds: best-effort `plugin.scheduler.fired` event or kernel-routed action call (gated targets fail into `last_error` unless the operator grants the permission — T-19 holds, no laundering) |
+| `sound` | `plugins/sound/` | — | audio output primitive — the single owner of the speakers: `sound_play` (file or inline base64 + format, volume/device) spawns a host player argv-only and returns immediately; `sound_stop` (idempotent, by id or all) / `sound_status`. Chains: wav → `pw-cat --playback` → `paplay` → `aplay`, non-wav → `ffplay`; capability-aware auto filtering (volume drops aplay, device drops ffplay), operator pin via `SOUND_PLUGIN_PLAYER`; replace-on-play; inline audio via capped temp files cleaned on reap; lazy reap, no watcher task. Fully offline (`PERMISSION_AUDIO`, existing enum 5). `notify`'s `speak:true` player migrates here later (see `plugins/sound/ROADMAP.md`) |
 
 ## Planned
 
@@ -47,7 +48,6 @@ Dependency order — each row can start once everything in "depends on" ships.
 | `email` | send/receive mail (SMTP/IMAP) | `network`, `secrets` (mailbox creds) | `network` (caller of gated `http_request`) |
 | `launcher` | launch apps/games by name — Steam (`steam://rungameid/<id>`, reads `libraryfolders.vdf`/`appmanifest_*.acf`) as one provider, generic app launch as another | `filesystem` (read manifests) | `PERMISSION_LAUNCH` (defined, proto v1.4) |
 | `capture` | screen/window capture + webcam frame + video recording — one PipeWire-based plugin (screen portal / V4L2 share the stack); OCR is a local tesseract spawn over its own frames (argv-only like `clipboard`/`notify`, fully offline; cloud-vision OCR stays available via `ai` vision for hard cases). Absorbs the old standalone `screenshot` row and the `camera` idea | — | `PERMISSION_SCREEN` (defined, proto v1.4), `PERMISSION_CAMERA` (new, enum 23) |
-| `sound` | audio output primitive: `sound_play`/`sound_stop`/`sound_status` — play bytes/file at a given volume/device, spawn `pw-cat`/`paplay`/`ffplay` per clip (argv-only). The single owner of the speakers: `tts` synthesizes but doesn't play host-side, `notify` migrates its `speak:true` built-in player here, ducking hook lowers `media` MPRIS volume while something speaks | — | `PERMISSION_AUDIO` (existing) |
 | `wifi` | Wi-Fi control via NetworkManager D-Bus: scan/list/connect/disconnect/forget/toggle radio, known-network management. Credentials stay in NM's own profile store — the plugin orchestrates and never handles raw PSKs | — | `PERMISSION_WIFI` (new, enum 20) |
 | `bluetooth` | device list/scan/pair/connect/disconnect, battery level, audio-profile select — BlueZ over D-Bus via zbus (same stack as `media`) | — | `PERMISSION_BLUETOOTH` (new, enum 21) |
 | `input` | virtual keyboard/mouse injection — type/click/move/scroll/key-tap via `ydotool`/`wtype`/`xdotool` spawn (argv-only); the agent's hands next to `window` (focus) and `capture` (eyes) | — | `PERMISSION_INPUT` (new, enum 22) |
@@ -253,8 +253,8 @@ What's actually new, in `veyron`:
   `PERMISSION_BLUETOOTH` = 21 (`bluetooth`), `PERMISSION_INPUT` = 22
   (`input`), `PERMISSION_CAMERA` = 23 (`capture`). One wire bump covers
   all four; land them together or keep the gap rule in mind if split.
-  `sound`, `metrics`, and the extended `system` need no new values — they
-  reuse existing ones.
+  `metrics`, and the extended `system` need no new values — they reuse
+  existing ones (`sound` already shipped that way on `PERMISSION_AUDIO`).
 - **Regenerate `veyron-wire` prost types.** **Shipped** — the generated
   `PermissionType` (prost, build-time from the proto) includes the new
   values; `known_permissions()` (kernel `R8-01`) and the JWT `permissions`
