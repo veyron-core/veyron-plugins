@@ -1,7 +1,7 @@
 {
   "meta": {
     "apiVersion": 2,
-    "lastUpdated": "2026-08-20"
+    "lastUpdated": "2026-08-22"
   },
   "revoked": [],
   "ai": {
@@ -125,6 +125,29 @@
         "archive_url": "https://raw.githubusercontent.com/veyron-core/veyron-plugins/main/dist/stt/versions/0.2.0/stt-0.2.0.zip",
         "sha256": "97cd80a5872da1ad043d4ddc9cb2dd712ba9a54494bf32d67e0018a854fa8249",
         "signature": "1bf3a3f283b3c860f6373a0007ad16b64e437f687ab1c59d48bfbed93f6e6f5118f37662d3ddf40036331c800203bfc812d1e4b2a65c71db7b93adfab6e90407",
+        "min_kernel_version": "0.1.0",
+        "max_kernel_version": "*"
+      }
+    }
+  },
+  "system": {
+    "name": "System",
+    "description": "Local host queries and simple reversible controls: battery, processes, memory, volume, backlight, session lock, power profile. Linux + macOS.",
+    "category": "utility",
+    "tags": [
+      "system",
+      "battery",
+      "volume",
+      "brightness",
+      "power"
+    ],
+    "status": "stable",
+    "source_url": "https://github.com/veyron-core/veyron-plugins/tree/main/plugins/system",
+    "versions": {
+      "0.3.0": {
+        "archive_url": "https://raw.githubusercontent.com/veyron-core/veyron-plugins/main/dist/system/versions/0.3.0/system-0.3.0.zip",
+        "sha256": "d77326c086242b91104dc8c25c537ca9becf524bd2516996f0b70ef66dbabbe6",
+        "signature": "",
         "min_kernel_version": "0.1.0",
         "max_kernel_version": "*"
       }
