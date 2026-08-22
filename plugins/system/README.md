@@ -27,11 +27,15 @@ No configuration required.
 | Capability | Linux | macOS |
 |---|---|---|
 | `sys_info`, `sys_procs` | `sysinfo` crate (cross-platform) | same |
-| `sys_battery` | UPower `DisplayDevice` on the system bus (`zbus`) | P3: `pmset -g batt` parse |
-| `sys_volume[_set/_mute]` | `wpctl` (PipeWire) → `pactl` (PulseAudio/pipewire-pulse) fallback chain | P3 |
+| `sys_battery` | UPower `DisplayDevice` on the system bus (`zbus`) | `pmset -g batt` parse; desktop Macs without a battery → NOT_SUPPORTED |
+| `sys_volume[_set/_mute]` | `wpctl` (PipeWire) → `pactl` (PulseAudio/pipewire-pulse) fallback chain | `osascript` volume settings (`toggle` = read-then-write inverse) |
 | `sys_brightness[_set]` | `/sys/class/backlight` write → `brightnessctl` fallback on EACCES | — |
-| `sys_lock` | `org.freedesktop.ScreenSaver.Lock` → `loginctl lock-session` chain | P3 |
+| `sys_lock` | `org.freedesktop.ScreenSaver.Lock` → `loginctl lock-session` chain | CGSession `-suspend` |
 | `sys_power_profile[_set]` | power-profiles-daemon D-Bus (both name/path generations) | — |
+
+The system D-Bus handle is wrapped in an opaque struct so no signature
+outside Linux cfg-blocks mentions zbus — the crate compiles and its pure
+parsers are CI-tested on every platform.
 
 Safety contract: `sys_brightness_set {percent: 0}` clamps to the device's
 minimum non-blanking step — the plugin can darken but never blank your
@@ -75,7 +79,7 @@ tool output.
 
 ## Testing
 
-`cargo test` — 37 unit + 4 end-to-end tests, no real desktop needed:
+`cargo test` — 45 unit + 4 end-to-end tests, no real desktop needed:
 pure parsers against fixture outputs (wpctl/pactl variants), UPower
 state/time mapping, sysfs brightness against tmpdir fixtures (including the
 EACCES → brightnessctl fallback), dispatch with fake backends,

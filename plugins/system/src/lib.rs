@@ -16,6 +16,9 @@ pub mod error;
 pub mod info;
 #[cfg(target_os = "linux")]
 pub mod lock;
+#[cfg(target_os = "macos")]
+pub mod macos;
+pub mod macos_parse;
 pub mod power_profile;
 pub mod request;
 pub mod runner;
@@ -34,7 +37,7 @@ use crate::error::SystemError;
 use crate::request::SysRequest;
 
 pub const PLUGIN_ID: &str = "system";
-pub const PLUGIN_VERSION: &str = "0.2.0";
+pub const PLUGIN_VERSION: &str = "0.3.0";
 
 /// Actions this plugin serves; must stay in sync with `plugin.json` and the
 /// kernel refuses ambiguous manifest declarations anyway.

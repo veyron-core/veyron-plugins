@@ -52,12 +52,19 @@ Architecture notes:
 
 Remaining from the original P2 list: none.
 
-## P3 — macOS subset
+## P3 — macOS subset, shipped (0.3.0)
 
-- Battery via `pmset -g batt` parse (IOKit later if needed).
-- Volume via `osascript` spawn (CoreAudio native later).
-- Lock via CGSession suspend.
-- `sys_info`/`sys_procs` already work — `sysinfo` is cross-platform.
+- Battery via `pmset -g batt` parse; desktop Macs without a battery fail
+  the startup probe → NOT_SUPPORTED, same semantics as missing UPower.
+- Volume via `osascript` volume settings; mute `toggle` is a
+  read-then-write inverse (AppleScript has no toggle primitive).
+- Lock via CGSession `-suspend`.
+- `sys_info`/`sys_procs` already worked — `sysinfo` is cross-platform.
+- Structure: pure output parsers live in non-gated `macos_parse.rs`
+  (CI-tested on Linux against fixtures); only spawn wiring sits behind
+  `cfg(target_os = "macos")`. The system-bus handle is an opaque struct so
+  zbus never leaks into cross-platform signatures (fixes a latent P1
+  compile-on-macOS hazard).
 - Brightness/night light stay Linux-only.
 
 ## Non-goals
