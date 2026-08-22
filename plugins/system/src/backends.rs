@@ -62,6 +62,30 @@ pub trait Battery: Send + Sync {
 #[async_trait::async_trait]
 pub trait Volume: Send + Sync {
     async fn get(&self) -> Result<VolumeStatus, SystemError>;
+    /// Set absolute volume 0..=100; returns the resulting reading.
+    async fn set(&self, percent: u8) -> Result<VolumeStatus, SystemError>;
+    /// Apply a mute mode; returns the resulting reading.
+    async fn mute(&self, mode: crate::request::MuteMode) -> Result<VolumeStatus, SystemError>;
+}
+
+#[async_trait::async_trait]
+pub trait Brightness: Send + Sync {
+    async fn get(&self) -> Result<u8, SystemError>;
+    /// Set absolute brightness 0..=100 (0 clamps to the non-blanking
+    /// floor); returns the resulting reading.
+    async fn set(&self, percent: u8) -> Result<u8, SystemError>;
+}
+
+#[async_trait::async_trait]
+pub trait SessionLock: Send + Sync {
+    async fn lock(&self) -> Result<(), SystemError>;
+}
+
+#[async_trait::async_trait]
+pub trait PowerProfiles: Send + Sync {
+    async fn get(&self) -> Result<crate::power_profile::ProfileState, SystemError>;
+    async fn set(&self, profile: crate::request::Profile)
+        -> Result<crate::power_profile::ProfileState, SystemError>;
 }
 
 /// The set of backends detected on this host. `None` = capability absent →
@@ -70,4 +94,7 @@ pub trait Volume: Send + Sync {
 pub struct SystemBackends {
     pub battery: Option<Arc<dyn Battery>>,
     pub volume: Option<Arc<dyn Volume>>,
+    pub brightness: Option<Arc<dyn Brightness>>,
+    pub lock: Option<Arc<dyn SessionLock>>,
+    pub power: Option<Arc<dyn PowerProfiles>>,
 }

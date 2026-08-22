@@ -1,11 +1,11 @@
 # system plugin
 
-Local host queries for vynkor plugins — battery, processes, memory, output
-volume, OS identity. One domain: the state of the machine this plugin runs
-on. P1 (0.1.0) is **read-only**; simple reversible setters
-(volume/mute/brightness/lock/power-profile) follow in P2 behind the same
-dispatch. Declares `PERMISSION_SYSTEM` (broad access by design — keep
-strict, see root `ROADMAP.md`).
+Local host queries and simple reversible controls for vynkor plugins —
+battery, processes, memory, output volume, backlight, session lock, power
+profile, OS identity. One domain: the state of the machine this plugin runs
+on. v0.2.0 ships the P2 setter wave behind the P1 read-only dispatch.
+Declares `PERMISSION_SYSTEM` (broad access by design — keep strict, see
+root `ROADMAP.md`).
 
 Deliberately out of scope forever: destructive or differently-scoped
 actions (kill process, network config, device management). Those would turn
@@ -28,7 +28,14 @@ No configuration required.
 |---|---|---|
 | `sys_info`, `sys_procs` | `sysinfo` crate (cross-platform) | same |
 | `sys_battery` | UPower `DisplayDevice` on the system bus (`zbus`) | P3: `pmset -g batt` parse |
-| `sys_volume` | `wpctl` (PipeWire) → `pactl` (PulseAudio/pipewire-pulse) fallback chain | P3 |
+| `sys_volume[_set/_mute]` | `wpctl` (PipeWire) → `pactl` (PulseAudio/pipewire-pulse) fallback chain | P3 |
+| `sys_brightness[_set]` | `/sys/class/backlight` write → `brightnessctl` fallback on EACCES | — |
+| `sys_lock` | `org.freedesktop.ScreenSaver.Lock` → `loginctl lock-session` chain | P3 |
+| `sys_power_profile[_set]` | power-profiles-daemon D-Bus (both name/path generations) | — |
+
+Safety contract: `sys_brightness_set {percent: 0}` clamps to the device's
+minimum non-blanking step — the plugin can darken but never blank your
+screen.
 
 Distro note: Arch/Debian/Fedora need nothing special — UPower,
 power-profiles-daemon and PipeWire/PulseAudio are freedesktop standards.
@@ -36,8 +43,9 @@ What matters is the session stack, not the distro.
 
 ## Actions
 
-All actions are parameterless (empty JSON object); non-empty params are
-rejected with `ERR_SYS_BAD_PARAMS`.
+Getters are parameterless; non-empty params on them (or malformed params
+anywhere) are rejected with `ERR_SYS_BAD_PARAMS`. Setters return the
+resulting reading, not an echo of the request.
 
 | Action | Params | Result |
 |---|---|---|
@@ -45,6 +53,13 @@ rejected with `ERR_SYS_BAD_PARAMS`.
 | `sys_battery` | — | `{ percent, state, time_to_empty_s, time_to_full_s }` — `state ∈ unknown/charging/discharging/empty/full`; times are seconds or `null` when unknown |
 | `sys_procs` | — | `{ process_count, load_avg: [1m,5m,15m], memory_total_mb, memory_used_mb }` |
 | `sys_volume` | — | `{ percent, muted }` — default sink volume 0–100 |
+| `sys_volume_set` | `percent` (0–100) | `{ percent, muted }` after the change |
+| `sys_volume_mute` | `mode`: `on`\|`off`\|`toggle` | `{ percent, muted }` after the change |
+| `sys_brightness` | — | `{ percent }` |
+| `sys_brightness_set` | `percent` (0–100, 0 = min non-blanking step) | `{ percent }` after the change |
+| `sys_lock` | — | `{ ok }` — ScreenSaver first, logind broadcast fallback |
+| `sys_power_profile` | — | `{ profile, available: [...] }` |
+| `sys_power_profile_set` | `profile`: `performance`\|`balanced`\|`power-saver` | `{ profile, available }` after the switch |
 
 ## Error taxonomy
 
@@ -60,8 +75,10 @@ tool output.
 
 ## Testing
 
-`cargo test` — 24 unit tests, no real desktop needed: pure parsers against
-fixture outputs (wpctl/pactl variants), UPower state/time mapping, dispatch
-with fake backends, provider-selection chains via a fake runner. The SDK
-serve loop is exercised upstream; P2 adds the fake-kernel end-to-end harness
-when parameterized setters arrive.
+`cargo test` — 37 unit + 4 end-to-end tests, no real desktop needed:
+pure parsers against fixture outputs (wpctl/pactl variants), UPower
+state/time mapping, sysfs brightness against tmpdir fixtures (including the
+EACCES → brightnessctl fallback), dispatch with fake backends,
+provider-selection chains via a fake runner — plus a fake-kernel harness
+(`UnixStream::pair`) driving the real serve loop through registration and
+wire-level error statuses.

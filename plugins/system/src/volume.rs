@@ -8,9 +8,10 @@ use async_trait::async_trait;
 
 use crate::backends::{Volume, VolumeStatus};
 use crate::error::SystemError;
+use crate::request::MuteMode;
 use crate::runner::CommandRunner;
 
-/// PipeWire's `wpctl` status of the default sink.
+/// PipeWire's `wpctl` control of the default sink.
 pub struct WpctlVolume {
     runner: Arc<dyn CommandRunner>,
 }
@@ -19,14 +20,11 @@ impl WpctlVolume {
     pub fn new(runner: Arc<dyn CommandRunner>) -> Self {
         Self { runner }
     }
-}
 
-#[async_trait]
-impl Volume for WpctlVolume {
-    async fn get(&self) -> Result<VolumeStatus, SystemError> {
+    async fn run(&self, args: &[&str]) -> Result<String, SystemError> {
         let out = self
             .runner
-            .run("wpctl", &["get-volume", "@DEFAULT_AUDIO_SINK@"])
+            .run("wpctl", args)
             .await
             .map_err(|e| SystemError::Backend(format!("wpctl failed: {e}")))?;
         if !out.ok {
@@ -35,8 +33,27 @@ impl Volume for WpctlVolume {
                 out.stderr.trim()
             )));
         }
-        parse_wpctl(&out.stdout)
-            .ok_or_else(|| SystemError::Backend(format!("unparseable wpctl output: {:?}", out.stdout)))
+        Ok(out.stdout)
+    }
+}
+
+#[async_trait]
+impl Volume for WpctlVolume {
+    async fn get(&self) -> Result<VolumeStatus, SystemError> {
+        let stdout = self.run(&["get-volume", "@DEFAULT_AUDIO_SINK@"]).await?;
+        parse_wpctl(&stdout)
+            .ok_or_else(|| SystemError::Backend(format!("unparseable wpctl output: {stdout:?}")))
+    }
+
+    async fn set(&self, percent: u8) -> Result<VolumeStatus, SystemError> {
+        let frac = format!("{:.2}", f64::from(percent) / 100.0);
+        self.run(&["set-volume", "@DEFAULT_AUDIO_SINK@", &frac]).await?;
+        self.get().await
+    }
+
+    async fn mute(&self, mode: MuteMode) -> Result<VolumeStatus, SystemError> {
+        self.run(&["set-mute", "@DEFAULT_AUDIO_SINK@", mode.as_tool_arg()]).await?;
+        self.get().await
     }
 }
 
@@ -51,7 +68,7 @@ impl PactlVolume {
         Self { runner }
     }
 
-    async fn raw(&self, args: &[&str]) -> Result<String, SystemError> {
+    async fn run(&self, args: &[&str]) -> Result<String, SystemError> {
         let out = self
             .runner
             .run("pactl", args)
@@ -70,15 +87,26 @@ impl PactlVolume {
 #[async_trait]
 impl Volume for PactlVolume {
     async fn get(&self) -> Result<VolumeStatus, SystemError> {
-        let vol_out = self.raw(&["get-sink-volume", "@DEFAULT_SINK@"]).await?;
-        let mute_out = self.raw(&["get-sink-mute", "@DEFAULT_SINK@"]).await?;
+        let vol_out = self.run(&["get-sink-volume", "@DEFAULT_SINK@"]).await?;
+        let mute_out = self.run(&["get-sink-mute", "@DEFAULT_SINK@"]).await?;
         let percent = parse_pactl_volume(&vol_out).ok_or_else(|| {
-            SystemError::Backend(format!("unparseable pactl volume output: {:?}", vol_out))
+            SystemError::Backend(format!("unparseable pactl volume output: {vol_out:?}"))
         })?;
         let muted = parse_pactl_mute(&mute_out).ok_or_else(|| {
-            SystemError::Backend(format!("unparseable pactl mute output: {:?}", mute_out))
+            SystemError::Backend(format!("unparseable pactl mute output: {mute_out:?}"))
         })?;
         Ok(VolumeStatus { percent, muted })
+    }
+
+    async fn set(&self, percent: u8) -> Result<VolumeStatus, SystemError> {
+        let arg = format!("{percent}%");
+        self.run(&["set-sink-volume", "@DEFAULT_SINK@", &arg]).await?;
+        self.get().await
+    }
+
+    async fn mute(&self, mode: MuteMode) -> Result<VolumeStatus, SystemError> {
+        self.run(&["set-sink-mute", "@DEFAULT_SINK@", mode.as_tool_arg()]).await?;
+        self.get().await
     }
 }
 

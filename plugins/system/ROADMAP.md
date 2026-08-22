@@ -5,7 +5,7 @@ Local host state: queries (P1, shipped) then simple reversible setters
 plugin runs on. The root `ROADMAP.md` Planned table carries the cross-plugin
 picture; this file is the per-plugin detail.
 
-## v1 scope — P1 shipped (0.1.0)
+## P1 scope — shipped (0.1.0)
 
 Read-only actions, all parameterless:
 
@@ -30,19 +30,27 @@ Architecture notes:
 - Stock SDK serve loop — no outbound RPC, so the single-reader rule never
   applies.
 
-## P2 — reversible setters
+## P2 — reversible setters, shipped (0.2.0)
 
-- `sys_volume_set { percent }`, `sys_volume_mute { enabled | toggle }`
-  through the same wpctl/pactl chain.
-- `sys_lock` — logind `LockSession` → org.freedesktop.ScreenSaver.Lock
-  fallback.
-- `sys_brightness_set { percent }` — direct `/sys/class/backlight` write,
-  falling back to spawn `brightnessctl` on EACCES; ship the udev rule in
-  `setup.md` and optional packages in `assets/dependencies.json`.
-- `sys_power_profile_get/set` — power-profiles-daemon D-Bus
-  (performance/balanced/power-saver); TLP-only hosts report NOT_SUPPORTED.
-- Fake-kernel end-to-end harness (UnixStream::pair shim) for the
-  parameterized actions.
+- `sys_volume_set { percent }`, `sys_volume_mute { mode }` through the same
+  wpctl/pactl chain; both return the resulting reading.
+- `sys_lock` — `org.freedesktop.ScreenSaver.Lock` (session bus) first,
+  `loginctl lock-session` broadcast as fallback; always detected on Linux
+  since neither path has a cheap presence probe.
+- `sys_brightness` / `sys_brightness_set { percent }` — direct
+  `/sys/class/backlight` write with `brightnessctl` fallback on EACCES;
+  **set(0) clamps to the minimum non-blanking step** so the plugin can
+  never strand the operator on a black screen. udev rule / optional
+  packages doc still pending (see P4).
+- `sys_power_profile` / `sys_power_profile_set` — power-profiles-daemon
+  D-Bus, probing both the renamed
+  (`org.freedesktop.UPower.PowerProfiles`) and legacy (`net.hadess`)
+  name/path pairs; TLP-only hosts report NOT_SUPPORTED.
+- Fake-kernel end-to-end harness (UnixStream::pair shim): registration
+  handshake, action roundtrip, and wire-level error statuses
+  (`ACTION_ERROR` vs `ACTION_NOT_FOUND`).
+
+Remaining from the original P2 list: none.
 
 ## P3 — macOS subset
 

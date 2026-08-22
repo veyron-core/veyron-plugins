@@ -8,35 +8,84 @@
 use std::sync::Arc;
 
 use crate::backends::{SystemBackends, Volume};
-use crate::runner::{CommandRunner, RunnerError, SharedRunner};
+use crate::brightness;
+use crate::runner::{CommandRunner, RealRunner, RunnerError, SharedRunner};
 use crate::volume::{PactlVolume, WpctlVolume};
 
 /// Detect every capability. Never fails: missing pieces become `None`.
 pub async fn detect() -> SystemBackends {
-    let runner: SharedRunner = Arc::new(crate::runner::RealRunner);
+    let runner: SharedRunner = Arc::new(RealRunner);
+    // One shared system-bus connection for every system-bus capability.
+    let sys_conn = system_bus().await;
     SystemBackends {
-        battery: detect_battery().await,
+        battery: detect_battery(sys_conn.as_ref()).await,
         volume: detect_volume(Arc::clone(&runner)).await,
+        brightness: brightness::detect(Arc::clone(&runner)),
+        lock: detect_lock(sys_conn.as_ref(), Arc::clone(&runner)).await,
+        power: detect_power(sys_conn.as_ref()).await,
     }
+}
+
+/// System D-Bus handle when the host has one; `None` degrades every
+/// system-bus capability independently.
+#[cfg(target_os = "linux")]
+async fn system_bus() -> Option<zbus::Connection> {
+    zbus::Connection::system().await.ok()
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn system_bus() -> Option<zbus::Connection> {
+    None
 }
 
 /// Battery backend, when a usable UPower DisplayDevice answers.
 #[cfg(target_os = "linux")]
-async fn detect_battery() -> Option<Arc<dyn crate::backends::Battery>> {
-    match zbus::Connection::system().await {
-        Ok(conn) => match crate::upower::UpowerBattery::connect(conn).await {
-            Ok(b) => Some(Arc::new(b)),
-            // No UPower on this host (headless server, container) — fine.
-            Err(_) => None,
-        },
+async fn detect_battery(conn: Option<&zbus::Connection>) -> Option<Arc<dyn crate::backends::Battery>> {
+    let conn = conn?;
+    match crate::upower::UpowerBattery::connect(conn.clone()).await {
+        Ok(b) => Some(Arc::new(b)),
+        // No UPower on this host (headless server, container) — fine.
         Err(_) => None,
     }
 }
 
 #[cfg(not(target_os = "linux"))]
-async fn detect_battery() -> Option<Arc<dyn crate::backends::Battery>> {
+async fn detect_battery(_conn: Option<&zbus::Connection>) -> Option<Arc<dyn crate::backends::Battery>> {
     // P3: pmset -g batt parse (macOS). Until then the action reports
     // ERR_SYS_NOT_SUPPORTED.
+    None
+}
+
+/// Session lock: always present on Linux as a call-time chain
+/// (ScreenSaver → loginctl); there is no cheap presence probe.
+#[cfg(target_os = "linux")]
+async fn detect_lock(
+    conn: Option<&zbus::Connection>,
+    runner: SharedRunner,
+) -> Option<Arc<dyn crate::backends::SessionLock>> {
+    let conn = conn.cloned()?;
+    Some(Arc::new(crate::lock::SessionBusLock::new(conn, runner)))
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn detect_lock(
+    _conn: Option<&zbus::Connection>,
+    _runner: SharedRunner,
+) -> Option<Arc<dyn crate::backends::SessionLock>> {
+    // P3: CGSession suspend spawn (macOS).
+    None
+}
+
+#[cfg(target_os = "linux")]
+async fn detect_power(conn: Option<&zbus::Connection>) -> Option<Arc<dyn crate::backends::PowerProfiles>> {
+    crate::power_profile::PpdProfiles::connect(conn?)
+        .await
+        .ok()
+        .map(|p| Arc::new(p) as Arc<dyn crate::backends::PowerProfiles>)
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn detect_power(_conn: Option<&zbus::Connection>) -> Option<Arc<dyn crate::backends::PowerProfiles>> {
     None
 }
 
