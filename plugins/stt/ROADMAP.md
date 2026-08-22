@@ -57,6 +57,20 @@ matches the "one blessed path per capability" convention. Actions:
 
 - Local model families: `transducer` (zipformer) and `whisper`.
 
+## Known bugs (live-kernel audit 2026-08-22)
+
+- **Local `sherpa` actions hang indefinitely before the model loads.**
+  First full live-kernel audit (`docs/LIVE_KERNEL_AUDIT_2026-08-22.md`,
+  defect #2): `stt_models`/`stt_transcribe` with provider `sherpa`
+  (zipformer ru int8 on disk, `STT_PLUGIN_LOCAL_MODEL_TYPE=transducer`,
+  path set via env) never respond — plugin sleeps, 0% CPU, RSS flat
+  ~22 MB: sherpa init never starts. Kernel deadline → `ACTION_TIMEOUT`
+  ~200 s. Same signature as `tts`'s local-engine hang in the same audit;
+  both share the sherpa-onnx init path, so likely one root cause.
+  Fix direction mirrors tts's: reproduce handler-direct with identical
+  env, diff supervised vs bare spawn if needed, add a real-model
+  integration test.
+
 ## Deliberately out of v1
 
 - **Streaming/partial transcripts** — offline recognizers only. A future
