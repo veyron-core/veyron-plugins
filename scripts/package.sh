@@ -14,7 +14,11 @@
 #       <slug>-<version>-src.zip            # plugin.json + src/ + Cargo.toml
 #       plugin.json                         # browse copy of the manifest
 #       checksum.sha256                     # "<sha256>  <slug>-<version>.zip" (two spaces)
-#       signature.sig                       # Ed25519 sig over "<slug>:<version>:<sha256>" (128 hex + newline)
+#       signature.sig                       # Ed25519 sig over the S1 canonical seven-field message
+#                                           #   "<slug>:<version>:<sha256>:<status>:<archive_url>:
+#                                           #    <min_kernel_version>:<max_kernel_version>"
+#                                           # (128 hex + newline); canonical form lives in
+#                                           # vynkor-manager/src/registry.rs::signed_message
 #
 # registry.json (v2) shape written:
 #   {
@@ -39,12 +43,15 @@
 #   VEYRON_SIGNING_KEY_HEX   64-hex-char Ed25519 seed (32 bytes)
 #   VEYRON_SIGNING_KEY_FILE  path to a file containing that 64-hex-char seed
 #   If either is set, the archive is signed over the ASCII message
-#   "<slug>:<version>:<sha256>", signature.sig is written, and the registry
-#   entry's "signature" is set. The signature is self-verified against the key
-#   that produced it (abort loudly on failure), and cross-checked against the
-#   kernel's pinned public key (warn, do not abort, when it differs). With no
-#   key configured, the entry gets an empty signature (rejected by `vyn install`
-#   until signed) and no signature.sig is written.
+#   "<slug>:<version>:<sha256>:<status>:<archive_url>:<min_kernel_version>:
+#   <max_kernel_version>" (the S1 canonical form verified by
+#   vynkor-manager's signed_message()), signature.sig is written, and the
+#   registry entry's "signature" is set. The signature is self-verified
+#   against the key that produced it (abort loudly on failure), and
+#   cross-checked against the pinned maintainer public key (warn, do not
+#   abort, when it differs). With no key configured, the entry gets an empty
+#   signature (rejected by `vynm install` until signed) and no signature.sig
+#   is written.
 #
 # Usage:
 #   scripts/package.sh <plugin-dir-name> "<Display Name>" "<Description>" \
@@ -209,15 +216,18 @@ fi
 signature=""
 if [[ -n "$seed" ]]; then
     echo "==> signing $slug:$version:$sha256"
-    signature=$(python3 - "$seed" "$slug" "$version" "$sha256" <<'PYEOF'
+    signature=$(python3 - "$seed" "$slug" "$version" "$sha256" \
+        "$status" "$archive_url" "$min_kernel" "$max_kernel" <<'PYEOF'
 import sys
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-seed_hex, slug, version, sha256 = sys.argv[1:5]
+(seed_hex, slug, version, sha256, status,
+ archive_url, min_kernel, max_kernel) = sys.argv[1:9]
 private_key = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(seed_hex))
 public_key = private_key.public_key()
-message = f"{slug}:{version}:{sha256}".encode("ascii")
+message = (f"{slug}:{version}:{sha256}:{status}:{archive_url}:"
+           f"{min_kernel}:{max_kernel}").encode("ascii")
 sig = private_key.sign(message)
 
 # Self-verify against the key that produced it: aborts loudly if the
@@ -228,10 +238,11 @@ except Exception as exc:
     print(f"error: signature self-verification failed: {exc}", file=sys.stderr)
     sys.exit(1)
 
-# Cross-check against the kernel's pinned public key. A mismatch means the
-# configured seed is not the production signing key: warn loudly (do not
-# abort, so key rotation / test keys are still usable), since `vyn install`
-# will reject the entry until it is signed by the real key.
+# Cross-check against the pinned maintainer public key (the one compiled
+# into vynkor-manager's official_source()). A mismatch means the configured
+# seed is not the production signing key: warn loudly (do not abort, so key
+# rotation / test keys are still usable), since `vynm install` will reject
+# the entry until it is signed by the real key.
 derived_hex = public_key.public_bytes(
     encoding=serialization.Encoding.Raw,
     format=serialization.PublicFormat.Raw,
@@ -240,8 +251,8 @@ PINNED = "ed8c39a19dcbfed1a3a436b914a8ce9bf2b449c534808ce92c78adcfa2590928"
 if derived_hex != PINNED:
     print(
         f"warning: signing key public key {derived_hex} does not match the "
-        f"kernel's pinned public key {PINNED}; the entry will be rejected by "
-        f"`vyn install` until re-signed with the correct key",
+        f"pinned maintainer public key {PINNED}; the entry will be rejected "
+        f"by `vynm install` until re-signed with the correct key",
         file=sys.stderr,
     )
 
@@ -250,7 +261,7 @@ PYEOF
 )
     printf '%s\n' "$signature" > "$version_dir/signature.sig"
 else
-    echo "warning: no signing key configured (VEYRON_SIGNING_KEY_HEX / VEYRON_SIGNING_KEY_FILE) — entry will have an empty signature; vyn install will reject it until signed" >&2
+    echo "warning: no signing key configured (VEYRON_SIGNING_KEY_HEX / VEYRON_SIGNING_KEY_FILE) — entry will have an empty signature; vynm install will reject it until signed" >&2
     rm -f "$version_dir/signature.sig"
 fi
 
